@@ -1,0 +1,100 @@
+# Local editor / OS files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Python cache / test / build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+.ipynb_checkpoints/
+*.egg-info/
+.eggs/
+build/
+dist/
+.tox/
+.nox/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Logs and runtime files
+*.log
+logs/
+nohup.out
+*.pid
+
+# ROS / colcon local artifacts
+/install/
+/log/
+
+# Project-local generated data and outputs
+/data/
+/datasets/
+/robot_datasets/
+/outputs/
+/runs/
+/tmp/
+/temp/
+
+# Ignore policy-runner training outputs, but keep the hand-written run notes.
+/lerobot_bw_policy_runner/outputs/*
+!/lerobot_bw_policy_runner/outputs/train/
+/lerobot_bw_policy_runner/outputs/train/*
+!/lerobot_bw_policy_runner/outputs/train/readme.txt
+
+**/check_report/
+**/.bw_act_visual_cache/
+**/.online_visual_features/
+
+# LeRobot / RL training artifacts
+**/checkpoints/
+wandb/
+mlruns/
+lightning_logs/
+tensorboard/
+events.out.tfevents.*
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+
+# Recorded robot data / large dataset files
+*.bag
+*.bag.active
+*.db3
+*.mcap
+rosbag2_*/
+*.parquet
+*.arrow
+*.hdf5
+*.h5
+*.npy
+*.npz
+*.mp4
+*.avi
+*.mkv
+*.mov
+
+# Local packaging / sandbox notes
+NOT_PUSHED_TO_GITHUB.txt

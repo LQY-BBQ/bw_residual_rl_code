@@ -1,0 +1,41 @@
+# BW LeRobot collector configuration.
+# mode=bc keeps the original imitation-learning collection behavior.
+# mode=rl records extra fields for residual SAC transition data.
+
+ros:
+  domain_id: 0
+
+robot:
+  robot_sn: BW_IZN3E0FU
+  topics:
+    state: /{robot_sn}/joint_states_fdb
+    arm_action: /{robot_sn}/Teleop/joint_angle_solution/smooth
+    gripper_action: /{robot_sn}/Teleop/gripper_pos
+
+    # Required only in --mode rl. Published by lerobot_bw_policy_runner debug publishers.
+    control_source: /{robot_sn}/Teleop/control_source
+    action_act: /{robot_sn}/Policy/debug/action_act
+    action_rl_delta: /{robot_sn}/Policy/debug/action_rl_delta
+    action_final: /{robot_sn}/Policy/debug/action_final
+
+cameras:
+  topics:
+    env_cam: /env_camera/image_raw
+    left_wrist_cam: /camera/left_d405/color/image_raw
+    right_wrist_cam: /camera/right_d405/color/image_raw
+
+dataset:
+  root: ~/robot_datasets/bw_lerobot
+  repo_prefix: local/bw_mantis
+  fps: 30
+  task: Collect a bimanual manipulation episode.
+  use_videos: true
+  video_codec: h264
+  mode: bc
+  episode_type: demo
+
+record:
+  warmup_timeout_s: 10.0
+  require_all_topics: true
+  require_rl_debug_topics: true
+  log_every_n_frames: 30

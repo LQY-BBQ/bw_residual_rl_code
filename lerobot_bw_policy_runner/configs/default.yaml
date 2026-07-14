@@ -1,0 +1,60 @@
+# BW policy runner configuration.
+# Final control topics stay unchanged. Debug topics are for data collection only.
+
+ros:
+  domain_id: 0
+
+robot:
+  robot_sn: BW_IZN3E0FU
+
+  input_topics:
+    state: /{robot_sn}/joint_states_fdb
+    control_source: /{robot_sn}/Teleop/control_source
+    cameras:
+      env_cam: /env_camera/image_raw
+      left_wrist_cam: /camera/left_d405/color/image_raw
+      right_wrist_cam: /camera/right_d405/color/image_raw
+
+  output_topics:
+    arm_action: /{robot_sn}/Policy/joint_angle_solution/smooth
+    gripper_action: /{robot_sn}/Policy/gripper_pos
+    debug_action_act: /{robot_sn}/Policy/debug/action_act
+    debug_action_rl_delta: /{robot_sn}/Policy/debug/action_rl_delta
+    debug_action_final: /{robot_sn}/Policy/debug/action_final
+
+inference:
+  mode: act
+  policy_path: null
+  device: cuda
+  use_amp: false
+  fps: 30.0
+  task: ""
+  robot_type: bw_runtime
+  warmup_timeout_s: 10.0
+  require_all_cameras: true
+  resize_images_to_policy_shape: true
+  dry_run: false
+  reset_policy_on_start: true
+  log_every_n_steps: 30
+  log_dir: null
+  arm_velocity_limit: null
+  gripper_name_style: joint
+
+  residual:
+    policy_path: null
+    # null means: use residual_lambda saved in the residual checkpoint.
+    lambda: null
+    deterministic: true
+    # residual_limits are always loaded from the residual checkpoint.
+
+
+  smoothing:
+    enabled: true
+    alpha: 0.35
+    max_delta: 0.03
+    gripper_max_delta: 0.02
+
+  clamp:
+    enabled: false
+    min: null
+    max: null

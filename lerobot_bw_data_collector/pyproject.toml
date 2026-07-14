@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lerobot-bw-data-collector"
+version = "0.2.0"
+description = "BW robot LeRobot collector with BC and residual-RL data modes"
+requires-python = ">=3.10"
+dependencies = ["numpy", "pyyaml"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

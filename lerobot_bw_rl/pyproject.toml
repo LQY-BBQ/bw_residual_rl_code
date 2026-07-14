@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lerobot-bw-rl"
+version = "0.2.0"
+description = "Frozen-ACT visual residual BC and offline residual SAC/CQL training for BW"
+requires-python = ">=3.10"
+dependencies = ["numpy", "pandas", "torch", "pyarrow"]
+
+[tool.setuptools]
+py-modules = [
+  "train_residual_bc",
+  "train_residual_sac",
+  "build_act_visual_cache",
+  "visual_cache",
+  "annotate_rewards",
+  "check_rl_rewards",
+]
+
+[tool.setuptools.packages.find]
+include = ["bw_datasets*", "policies*"]

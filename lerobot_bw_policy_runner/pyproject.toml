@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lerobot-bw-policy-runner"
+version = "0.3.0"
+description = "BW LeRobot ACT, ACT+visual residual BC, and ACT+visual residual RL runner"
+requires-python = ">=3.10"
+dependencies = ["numpy", "pyyaml", "torch"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

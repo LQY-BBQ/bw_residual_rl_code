@@ -52,7 +52,7 @@ inference:
     enabled: true
     alpha: 0.35
     max_delta: 0.03
-    gripper_max_delta: 0.02
+    gripper_max_delta: 0.1
 
   clamp:
     enabled: false

@@ -22,6 +22,7 @@ act_residual_rl
 ```text
 /{robot_sn}/Policy/debug/action_act
 /{robot_sn}/Policy/debug/action_rl_delta
+/{robot_sn}/Policy/debug/action_composed
 /{robot_sn}/Policy/debug/action_final
 ```
 
@@ -63,6 +64,15 @@ ACT三路投影视觉特征
        -> pooled visual feature -> residual BC/RL
 
 final = action_ACT + lambda × residual_limits × residual_norm
+```
+
+四个调试话题的含义：
+
+```text
+action_act       = ACT 输出
+action_rl_delta  = residual_limits × residual_norm
+action_composed  = action_act + lambda × action_rl_delta
+action_final     = action_composed 经过 clamp 和 smoothing 后的最终下发命令
 ```
 
 ## 3. 只运行 ACT
@@ -127,3 +137,26 @@ Residual 模式启动时会检查：
 - state/action 都是 16 维。
 
 不一致时程序会直接停止，不会带着错误模型控制机器人。
+
+## 7. 实时动作可视化
+
+可视化是独立 ROS2 进程，只订阅四个调试话题，不加载策略模型、不占用 GPU，也不会发布机器人控制命令。
+
+第一次使用时安装可选依赖：
+
+```bash
+cd ~/mycode/bw_residual_rl_code/lerobot_bw_policy_runner
+source ~/venvs/lerobot_ros310/bin/activate
+python3 -m pip install -e '.[visualization]'
+```
+
+启动推理节点后，在另一个终端运行：
+
+```bash
+./scripts/run_action_visualizer.sh \
+  --robot-sn BW_IZN3E0FU \
+  --window-seconds 10 \
+  --refresh-hz 20
+```
+
+窗口包含四个可选择关节的面板。每个面板同时显示 ACT、ACT+有效残差、最终下发命令三条曲线，以及原始残差、有效残差和后处理差值。这里的 `Final command` 是下发给控制器的命令，不是关节反馈位置。

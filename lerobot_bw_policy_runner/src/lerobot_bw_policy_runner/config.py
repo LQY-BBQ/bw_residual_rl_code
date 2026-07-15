@@ -28,6 +28,7 @@ class OutputTopics:
     gripper_action: str
     debug_action_act: str
     debug_action_rl_delta: str
+    debug_action_composed: str
     debug_action_final: str
 
 
@@ -215,6 +216,7 @@ def load_config(config_path: str | Path, *, robot_sn: str | None = None, policy_
                 gripper_action=_expand_robot_sn(raw_output_topics["gripper_action"], final_robot_sn),
                 debug_action_act=_expand_robot_sn(raw_output_topics.get("debug_action_act", f"/{final_robot_sn}/Policy/debug/action_act"), final_robot_sn),
                 debug_action_rl_delta=_expand_robot_sn(raw_output_topics.get("debug_action_rl_delta", f"/{final_robot_sn}/Policy/debug/action_rl_delta"), final_robot_sn),
+                debug_action_composed=_expand_robot_sn(raw_output_topics.get("debug_action_composed", f"/{final_robot_sn}/Policy/debug/action_composed"), final_robot_sn),
                 debug_action_final=_expand_robot_sn(raw_output_topics.get("debug_action_final", f"/{final_robot_sn}/Policy/debug/action_final"), final_robot_sn),
             ),
         ),

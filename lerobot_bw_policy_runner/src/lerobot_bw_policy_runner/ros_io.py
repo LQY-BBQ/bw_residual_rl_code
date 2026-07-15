@@ -53,6 +53,7 @@ class BWObservationReader(Node):
         self.gripper_publisher = self.create_publisher(JointState, config.robot.output_topics.gripper_action, 10)
         self.debug_act_publisher = self.create_publisher(JointState, config.robot.output_topics.debug_action_act, 10)
         self.debug_delta_publisher = self.create_publisher(JointState, config.robot.output_topics.debug_action_rl_delta, 10)
+        self.debug_composed_publisher = self.create_publisher(JointState, config.robot.output_topics.debug_action_composed, 10)
         self.debug_final_publisher = self.create_publisher(JointState, config.robot.output_topics.debug_action_final, 10)
 
         self.get_logger().info(f"Subscribed state: {config.robot.input_topics.state}")
@@ -64,6 +65,7 @@ class BWObservationReader(Node):
         self.get_logger().info(f"Policy gripper output: {config.robot.output_topics.gripper_action}")
         self.get_logger().info(f"Debug action_act:      {config.robot.output_topics.debug_action_act}")
         self.get_logger().info(f"Debug action_delta:    {config.robot.output_topics.debug_action_rl_delta}")
+        self.get_logger().info(f"Debug action_composed: {config.robot.output_topics.debug_action_composed}")
         self.get_logger().info(f"Debug action_final:    {config.robot.output_topics.debug_action_final}")
 
     def _on_state(self, msg: JointState) -> None:
@@ -142,12 +144,21 @@ class BWObservationReader(Node):
         self.arm_publisher.publish(arm_msg)
         self.gripper_publisher.publish(gripper_msg)
 
-    def publish_debug_actions(self, act_msg: JointState, delta_msg: JointState, final_msg: JointState, *, dry_run: bool = False) -> None:
+    def publish_debug_actions(
+        self,
+        act_msg: JointState,
+        delta_msg: JointState,
+        composed_msg: JointState,
+        final_msg: JointState,
+        *,
+        dry_run: bool = False,
+    ) -> None:
         # Debug topics are safe: they are not consumed by mantis_comm_node as control inputs.
         if dry_run:
             return
         self.debug_act_publisher.publish(act_msg)
         self.debug_delta_publisher.publish(delta_msg)
+        self.debug_composed_publisher.publish(composed_msg)
         self.debug_final_publisher.publish(final_msg)
 
     @property

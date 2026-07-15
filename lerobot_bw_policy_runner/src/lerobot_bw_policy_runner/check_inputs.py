@@ -55,6 +55,7 @@ def main(argv: list[str] | None = None) -> int:
         print("Debug topics:")
         print(f"  {config.robot.output_topics.debug_action_act}")
         print(f"  {config.robot.output_topics.debug_action_rl_delta}")
+        print(f"  {config.robot.output_topics.debug_action_composed}")
         print(f"  {config.robot.output_topics.debug_action_final}")
         print(f"\nWaiting up to {timeout_s:.1f}s for messages...")
         if not reader.wait_for_first_messages(timeout_s):

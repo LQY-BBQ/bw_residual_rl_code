@@ -9,5 +9,8 @@ description = "BW LeRobot ACT, ACT+visual residual BC, and ACT+visual residual R
 requires-python = ">=3.10"
 dependencies = ["numpy", "pyyaml", "torch"]
 
+[project.optional-dependencies]
+visualization = ["PyQt5>=5.15,<6", "pyqtgraph>=0.13,<0.14"]
+
 [tool.setuptools.packages.find]
 where = ["src"]

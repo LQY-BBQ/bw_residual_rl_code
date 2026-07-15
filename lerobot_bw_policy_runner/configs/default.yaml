@@ -20,6 +20,7 @@ robot:
     gripper_action: /{robot_sn}/Policy/gripper_pos
     debug_action_act: /{robot_sn}/Policy/debug/action_act
     debug_action_rl_delta: /{robot_sn}/Policy/debug/action_rl_delta
+    debug_action_composed: /{robot_sn}/Policy/debug/action_composed
     debug_action_final: /{robot_sn}/Policy/debug/action_final
 
 inference:

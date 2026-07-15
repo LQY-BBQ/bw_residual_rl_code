@@ -292,11 +292,13 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 debug_act = vector_to_joint_state(action_act, stamp=stamp)
                 debug_delta = vector_to_joint_state(delta_joint, stamp=stamp)
+                debug_composed = vector_to_joint_state(action_final_raw, stamp=stamp)
                 debug_final = vector_to_joint_state(action_final, stamp=stamp)
                 reader.publish_action(arm_msg, gripper_msg, dry_run=config.inference.dry_run)
                 reader.publish_debug_actions(
                     debug_act,
                     debug_delta,
+                    debug_composed,
                     debug_final,
                     dry_run=config.inference.dry_run,
                 )

@@ -1,12 +1,12 @@
-	act_pick_block_0617使用的指令
+act_pick_block_gen3 使用的指令
 lerobot-train \
-  --dataset.repo_id=local/pick_block_0617_merged \
-  --dataset.root=$HOME/robot_datasets/pick_block_0617_merged \
+  --dataset.repo_id=local/pick_block_gen3_merged \
+  --dataset.root=$HOME/robot_datasets/pick_block_gen3_merged \
   --policy.type=act \
   --policy.device=cuda \
   --policy.push_to_hub=false \
-  --output_dir=$HOME/outputs/train/act_pick_block_0617 \
-  --job_name=act_pick_block_0617 \
+  --output_dir=$HOME/outputs/train/act_pick_block_gen3 \
+  --job_name=act_pick_block_gen3 \
   --wandb.enable=false \
   --batch_size=4 \
   --num_workers=2 \
@@ -16,16 +16,16 @@ lerobot-train \
   --policy.chunk_size=30 \
   --policy.n_action_steps=30
   运行结果： ep:83 epch:1.67 loss:0.112 grdn:11.912 lr:1.0e-05
-  
-  	act_pick_block_0617_V2使用的指令
+
+act_pick_block_gen3 使用的指令
 lerobot-train \
-  --dataset.repo_id=local/pick_block_0617_merged \
-  --dataset.root=$HOME/robot_datasets/pick_block_0617_merged \
+  --dataset.repo_id=local/pick_block_gen3_merged \
+  --dataset.root=$HOME/robot_datasets/pick_block_gen3_merged \
   --policy.type=act \
   --policy.device=cuda \
   --policy.push_to_hub=false \
-  --output_dir=$HOME/outputs/train/act_pick_block_0617_v2 \
-  --job_name=act_pick_block_0617_V2 \
+  --output_dir=$HOME/outputs/train/act_pick_block_gen3 \
+  --job_name=act_pick_block_gen3 \
   --wandb.enable=false \
   --batch_size=8 \
   --num_workers=2 \
@@ -72,7 +72,7 @@ cd /home/lanchong/mycode/bw_residual_rl_code/lerobot_bw_rl
 
 python3 train_residual_bc.py \
   --dataset.root /home/lanchong/robot_datasets/bw_rl_corrections_merged \
-  --act-policy-path /home/lanchong/mycode/bw_residual_rl_code/lerobot_bw_policy_runner/outputs/train/act_pick_block_0617_v2/checkpoints/last/pretrained_model \
+  --act-policy-path /home/lanchong/mycode/bw_residual_rl_code/lerobot_bw_policy_runner/outputs/train/act_pick_block_gen3/checkpoints/last/pretrained_model \
   --output_dir /home/lanchong/mycode/bw_residual_rl_code/lerobot_bw_policy_runner/outputs/train/residual_bc_pick_block_30_v2 \
   --device cuda \
   --steps 80000 \
@@ -84,4 +84,3 @@ python3 train_residual_bc.py \
   --residual-limit-gripper 0.30 \
   --visual-feature-mode cache
   
-

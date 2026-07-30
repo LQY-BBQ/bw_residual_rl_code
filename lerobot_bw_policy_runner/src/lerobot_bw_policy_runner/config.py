@@ -7,7 +7,7 @@ from typing import Any
 
 import yaml
 
-from .constants import JOINT_NAMES
+from .constants import CAMERA_NAMES, CAMERA_SOURCES, CAMERA_TOPICS, JOINT_NAMES
 
 
 @dataclass(slots=True)
@@ -37,6 +37,23 @@ class RobotConfig:
     robot_sn: str
     input_topics: InputTopics
     output_topics: OutputTopics
+
+
+@dataclass(slots=True)
+class CameraSourceConfig:
+    width: int
+    height: int
+    encoding: str
+
+
+@dataclass(slots=True)
+class CameraStreamConfig:
+    sources: dict[str, CameraSourceConfig]
+    expected_fps: float = 30.0
+    minimum_fps: float = 28.5
+    rate_measurement_s: float = 2.0
+    max_frame_age_s: float = 0.15
+    require_new_frames: bool = True
 
 
 @dataclass(slots=True)
@@ -72,7 +89,6 @@ class InferenceConfig:
     task: str = ""
     robot_type: str = "bw_runtime"
     warmup_timeout_s: float = 10.0
-    resize_images_to_policy_shape: bool = True
     dry_run: bool = False
     reset_policy_on_start: bool = True
     require_all_cameras: bool = True
@@ -83,6 +99,7 @@ class InferenceConfig:
     clamp: ActionClampConfig | None = None
     residual: ResidualConfig | None = None
     log_dir: Path | None = None
+    camera_stream: CameraStreamConfig | None = None
 
 
 @dataclass(slots=True)
@@ -160,6 +177,7 @@ def load_config(config_path: str | Path, *, robot_sn: str | None = None, policy_
     raw_robot = raw.get("robot", {}) or {}
     raw_inference = raw.get("inference", {}) or {}
     raw_residual = raw_inference.get("residual", {}) or {}
+    raw_camera_stream = raw_inference.get("camera_stream", {}) or {}
 
     final_robot_sn = str(robot_sn or raw_robot.get("robot_sn") or "").strip()
     if not final_robot_sn or final_robot_sn == "BW_XXXXXXX":
@@ -172,6 +190,12 @@ def load_config(config_path: str | Path, *, robot_sn: str | None = None, policy_
     camera_topics = raw_input_topics.get("cameras", {}) or {}
     if not isinstance(camera_topics, dict) or not camera_topics:
         raise ValueError("robot.input_topics.cameras must be a non-empty mapping")
+    camera_topics = {str(name): str(topic) for name, topic in camera_topics.items()}
+    if tuple(camera_topics) != CAMERA_NAMES or camera_topics != CAMERA_TOPICS:
+        raise ValueError(
+            "robot.input_topics.cameras must match the ordered third-generation BW contract: "
+            f"{CAMERA_TOPICS}, got {camera_topics}"
+        )
     for key in ["arm_action", "gripper_action"]:
         if key not in raw_output_topics:
             raise ValueError(f"Missing robot.output_topics.{key}")
@@ -185,6 +209,52 @@ def load_config(config_path: str | Path, *, robot_sn: str | None = None, policy_
     final_policy_path = _as_optional_path(policy_path if policy_path is not None else raw_inference.get("policy_path"))
     final_residual_path = _as_optional_path(residual_policy_path if residual_policy_path is not None else raw_residual.get("policy_path"))
     final_log_dir = _as_optional_path(log_dir if log_dir is not None else raw_inference.get("log_dir"))
+
+    raw_camera_sources = raw_camera_stream.get("sources", {}) or {}
+    if not isinstance(raw_camera_sources, dict):
+        raise ValueError("inference.camera_stream.sources must be a mapping")
+    camera_sources: dict[str, CameraSourceConfig] = {}
+    for camera_name, source in raw_camera_sources.items():
+        if camera_name not in camera_topics:
+            raise ValueError(f"camera_stream.sources contains unknown camera {camera_name!r}")
+        if not isinstance(source, dict):
+            raise ValueError(f"camera_stream.sources.{camera_name} must be a mapping")
+        width = int(source.get("width", 0))
+        height = int(source.get("height", 0))
+        encoding = str(source.get("encoding", "")).strip().lower()
+        if width <= 0 or height <= 0 or not encoding:
+            raise ValueError(
+                f"camera_stream.sources.{camera_name} requires positive width/height and an encoding"
+            )
+        camera_sources[str(camera_name)] = CameraSourceConfig(width, height, encoding)
+    missing_camera_sources = sorted(set(camera_topics) - set(camera_sources))
+    if missing_camera_sources:
+        raise ValueError(
+            f"inference.camera_stream.sources is missing configured cameras: {missing_camera_sources}"
+        )
+    configured_sources = {
+        name: (source.width, source.height, source.encoding)
+        for name, source in camera_sources.items()
+    }
+    if tuple(configured_sources) != CAMERA_NAMES or configured_sources != CAMERA_SOURCES:
+        raise ValueError(
+            "inference.camera_stream.sources must match the ordered third-generation BW contract: "
+            f"{CAMERA_SOURCES}, got {configured_sources}"
+        )
+    expected_camera_fps = float(raw_camera_stream.get("expected_fps", 30.0))
+    minimum_camera_fps = float(raw_camera_stream.get("minimum_fps", expected_camera_fps * 0.95))
+    rate_measurement_s = float(raw_camera_stream.get("rate_measurement_s", 2.0))
+    max_frame_age_s = float(raw_camera_stream.get("max_frame_age_s", 0.15))
+    if expected_camera_fps <= 0 or not 0 < minimum_camera_fps <= expected_camera_fps:
+        raise ValueError("camera_stream expected_fps/minimum_fps must satisfy 0 < minimum <= expected")
+    if rate_measurement_s <= 0 or max_frame_age_s <= 0:
+        raise ValueError("camera_stream rate_measurement_s and max_frame_age_s must be positive")
+    final_inference_fps = float(fps if fps is not None else raw_inference.get("fps", 30.0))
+    if abs(final_inference_fps - expected_camera_fps) > 1e-6:
+        raise ValueError(
+            f"inference.fps={final_inference_fps:g} must match "
+            f"inference.camera_stream.expected_fps={expected_camera_fps:g}"
+        )
 
     smoothing_raw = raw_inference.get("smoothing", {}) or {}
     clamp_raw = raw_inference.get("clamp", {}) or {}
@@ -208,7 +278,7 @@ def load_config(config_path: str | Path, *, robot_sn: str | None = None, policy_
             robot_sn=final_robot_sn,
             input_topics=InputTopics(
                 state=_expand_robot_sn(raw_input_topics["state"], final_robot_sn),
-                cameras={str(name): str(topic) for name, topic in camera_topics.items()},
+                cameras=camera_topics,
                 control_source=_expand_robot_sn(raw_input_topics.get("control_source", f"/{final_robot_sn}/Teleop/control_source"), final_robot_sn),
             ),
             output_topics=OutputTopics(
@@ -224,12 +294,11 @@ def load_config(config_path: str | Path, *, robot_sn: str | None = None, policy_
             mode=final_mode,
             policy_path=final_policy_path,
             device=str(device if device is not None else raw_inference.get("device", "cuda")),
-            fps=float(fps if fps is not None else raw_inference.get("fps", 30.0)),
+            fps=final_inference_fps,
             use_amp=_as_bool(raw_inference.get("use_amp", False)),
             task=" ".join(str(task if task is not None else raw_inference.get("task", "")).split()),
             robot_type=str(raw_inference.get("robot_type", "bw_runtime")),
             warmup_timeout_s=float(raw_inference.get("warmup_timeout_s", 10.0)),
-            resize_images_to_policy_shape=_as_bool(raw_inference.get("resize_images_to_policy_shape", True)),
             dry_run=bool(dry_run) if dry_run is not None else _as_bool(raw_inference.get("dry_run", False)),
             reset_policy_on_start=_as_bool(raw_inference.get("reset_policy_on_start", True)),
             require_all_cameras=_as_bool(raw_inference.get("require_all_cameras", True)),
@@ -240,6 +309,14 @@ def load_config(config_path: str | Path, *, robot_sn: str | None = None, policy_
             clamp=ActionClampConfig(enabled=_as_bool(clamp_raw.get("enabled", False)), min=_as_optional_float_list(clamp_raw.get("min")), max=_as_optional_float_list(clamp_raw.get("max"))),
             residual=residual_cfg,
             log_dir=final_log_dir,
+            camera_stream=CameraStreamConfig(
+                sources=camera_sources,
+                expected_fps=expected_camera_fps,
+                minimum_fps=minimum_camera_fps,
+                rate_measurement_s=rate_measurement_s,
+                max_frame_age_s=max_frame_age_s,
+                require_new_frames=_as_bool(raw_camera_stream.get("require_new_frames", True)),
+            ),
         ),
     )
 

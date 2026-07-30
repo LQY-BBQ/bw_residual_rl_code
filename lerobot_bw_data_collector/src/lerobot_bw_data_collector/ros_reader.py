@@ -13,6 +13,7 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 from sensor_msgs.msg import Image, JointState
 from std_msgs.msg import Int32
 
+from .camera_stream import CameraStreamStatus, CameraStreamTracker
 from .config import AppConfig
 from .image_utils import ros_image_to_rgb
 from .joint_mapping import action_from_joint_states, joint_dict_to_vector, state_from_joint_state, vector_from_joint_state
@@ -52,7 +53,10 @@ class BWTopicReader(Node):
         self._latest_action_rl_delta: JointState | None = None
         self._latest_action_final: JointState | None = None
         self._latest_images: dict[str, Image] = {}
+        self._camera_tracker = CameraStreamTracker(list(config.cameras.topics))
+        self._consumed_image_sequences = {name: 0 for name in config.cameras.topics}
         self._last_error: str | None = None
+        self._last_wait_reason: str | None = None
 
         joint_qos = 10
         image_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE, history=HistoryPolicy.KEEP_LAST)
@@ -98,7 +102,13 @@ class BWTopicReader(Node):
     def _make_image_callback(self, camera_name: str):
         def _callback(msg: Image) -> None:
             with self._lock:
-                self._latest_images[camera_name] = msg
+                is_unique = self._camera_tracker.update(
+                    camera_name,
+                    msg,
+                    received_monotonic=time.monotonic(),
+                )
+                if is_unique:
+                    self._latest_images[camera_name] = msg
         return _callback
 
     def missing_inputs(self) -> list[str]:
@@ -130,6 +140,65 @@ class BWTopicReader(Node):
                 last_log = now
         return not self.missing_inputs()
 
+    def camera_image_info(self) -> dict[str, dict[str, int | str]]:
+        """Return source metadata for the latest message from each camera."""
+        with self._lock:
+            image_msgs = dict(self._latest_images)
+        return {
+            camera_name: {
+                "topic": self.config.cameras.topics[camera_name],
+                "width": int(msg.width),
+                "height": int(msg.height),
+                "encoding": str(msg.encoding),
+                "step": int(msg.step),
+            }
+            for camera_name, msg in image_msgs.items()
+        }
+
+    def camera_source_errors(self) -> list[str]:
+        """Validate the current ROS messages against the configured camera contract."""
+        with self._lock:
+            image_msgs = dict(self._latest_images)
+        errors: list[str] = []
+        for camera_name, expected in self.config.cameras.sources.items():
+            msg = image_msgs.get(camera_name)
+            if msg is None:
+                errors.append(f"{camera_name}: no image received")
+                continue
+            actual = (int(msg.width), int(msg.height), str(msg.encoding).strip().lower())
+            wanted = (expected.width, expected.height, expected.encoding)
+            if actual != wanted:
+                errors.append(
+                    f"{camera_name}: source={actual[0]}x{actual[1]} {actual[2]!r}, "
+                    f"expected={wanted[0]}x{wanted[1]} {wanted[2]!r}"
+                )
+        return errors
+
+    def measure_camera_streams(
+        self,
+        duration_s: float,
+        *,
+        spin: bool = True,
+    ) -> dict[str, CameraStreamStatus]:
+        """Measure unique, timestamp-deduplicated camera frames over a wall-clock window."""
+        duration_s = max(float(duration_s), 0.01)
+        with self._lock:
+            start_counts = self._camera_tracker.counters()
+        started = time.monotonic()
+        deadline = started + duration_s
+        while rclpy.ok() and time.monotonic() < deadline:
+            if spin:
+                rclpy.spin_once(self, timeout_sec=min(0.05, max(deadline - time.monotonic(), 0.0)))
+            else:
+                time.sleep(min(0.05, max(deadline - time.monotonic(), 0.0)))
+        ended = time.monotonic()
+        with self._lock:
+            return self._camera_tracker.statuses(
+                start_counts,
+                duration_s=ended - started,
+                now_monotonic=ended,
+            )
+
     @staticmethod
     def _stamp_to_float(msg: object | None) -> float | None:
         stamp = getattr(getattr(msg, "header", None), "stamp", None)
@@ -137,7 +206,16 @@ class BWTopicReader(Node):
             return None
         return float(getattr(stamp, "sec", 0)) + float(getattr(stamp, "nanosec", 0)) * 1e-9
 
-    def get_latest_sample(self) -> CollectorSample | None:
+    def get_latest_sample(
+        self,
+        *,
+        require_new_images: bool | None = None,
+        max_image_age_s: float | None = None,
+    ) -> CollectorSample | None:
+        if require_new_images is None:
+            require_new_images = self.config.cameras.require_new_frames
+        if max_image_age_s is None:
+            max_image_age_s = self.config.cameras.max_frame_age_s
         with self._lock:
             state_msg = self._latest_state
             arm_msg = self._latest_arm_action
@@ -147,17 +225,43 @@ class BWTopicReader(Node):
             delta_msg = self._latest_action_rl_delta
             final_msg = self._latest_action_final
             image_msgs = dict(self._latest_images)
+            image_sequences = self._camera_tracker.sequences()
+            image_received_times = self._camera_tracker.received_times()
 
         if state_msg is None or arm_msg is None or gripper_msg is None:
             return None
         for camera_name in self.config.cameras.topics:
             if camera_name not in image_msgs:
                 return None
+        if require_new_images:
+            waiting = [
+                name
+                for name in self.config.cameras.topics
+                if image_sequences[name] <= self._consumed_image_sequences[name]
+            ]
+            if waiting:
+                self._last_error = None
+                self._last_wait_reason = f"waiting for new image(s): {', '.join(waiting)}"
+                return None
+        now = time.monotonic()
+        stale = {
+            name: now - image_received_times[name]
+            for name in self.config.cameras.topics
+            if now - image_received_times[name] > float(max_image_age_s)
+        }
+        if stale:
+            detail = ", ".join(f"{name}={age:.3f}s" for name, age in stale.items())
+            self._last_error = None
+            self._last_wait_reason = f"stale camera image(s): {detail}"
+            return None
         if self.config.dataset.mode == "rl" and self.config.record.require_rl_debug_topics:
             if control_msg is None or act_msg is None or delta_msg is None or final_msg is None:
                 return None
 
         try:
+            source_errors = self.camera_source_errors()
+            if source_errors:
+                raise ValueError("; ".join(source_errors))
             state_dict = state_from_joint_state(state_msg, source_label=f"state:{self.config.robot.topics.state}")
             human_action_dict = action_from_joint_states(
                 arm_msg, gripper_msg,
@@ -168,8 +272,17 @@ class BWTopicReader(Node):
             human_vec = joint_dict_to_vector(human_action_dict)
             images = {camera_name: ros_image_to_rgb(image_msgs[camera_name]) for camera_name in self.config.cameras.topics}
 
+            if require_new_images:
+                with self._lock:
+                    for camera_name, sequence in image_sequences.items():
+                        self._consumed_image_sequences[camera_name] = max(
+                            self._consumed_image_sequences[camera_name],
+                            sequence,
+                        )
+
             if self.config.dataset.mode == "bc":
                 self._last_error = None
+                self._last_wait_reason = None
                 return CollectorSample(observation_state=state_vec, action=human_vec, images=images)
 
             control_source = int(getattr(control_msg, "data", 0)) if control_msg is not None else -1
@@ -192,6 +305,7 @@ class BWTopicReader(Node):
             return None
 
         self._last_error = None
+        self._last_wait_reason = None
         return CollectorSample(
             observation_state=state_vec,
             action=action_executed,
@@ -209,6 +323,10 @@ class BWTopicReader(Node):
     @property
     def last_error(self) -> str | None:
         return self._last_error
+
+    @property
+    def last_wait_reason(self) -> str | None:
+        return self._last_wait_reason
 
 
 def init_ros(config: AppConfig) -> None:

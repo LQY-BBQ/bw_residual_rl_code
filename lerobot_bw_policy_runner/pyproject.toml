@@ -7,7 +7,7 @@ name = "lerobot-bw-policy-runner"
 version = "0.3.0"
 description = "BW LeRobot ACT, ACT+visual residual BC, and ACT+visual residual RL runner"
 requires-python = ">=3.10"
-dependencies = ["numpy", "pyyaml", "torch"]
+dependencies = ["numpy", "pyyaml", "torch", "opencv-python-headless>=4.5"]
 
 [project.optional-dependencies]
 visualization = ["PyQt5>=5.15,<6", "pyqtgraph>=0.13,<0.14"]

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import sys
 import time
 
 import rclpy
@@ -63,14 +64,48 @@ def main(argv: list[str] | None = None) -> int:
             for topic in reader.missing_inputs():
                 print(f"  - {topic}")
             return 2
-        sample = reader.get_latest_sample()
+        source_errors = reader.camera_source_errors()
+        if source_errors:
+            print("Camera source contract mismatch:", file=sys.stderr)
+            for error in source_errors:
+                print(f"  - {error}", file=sys.stderr)
+            return 3
+        stream_config = config.inference.camera_stream
+        assert stream_config is not None
+        print(f"\nMeasuring unique camera frames for {stream_config.rate_measurement_s:.1f}s...")
+        statuses = reader.measure_camera_streams(stream_config.rate_measurement_s)
+        rates_ok = True
+        for camera_name, status in statuses.items():
+            passed = (
+                status.fps >= stream_config.minimum_fps
+                and status.age_s <= stream_config.max_frame_age_s
+                and status.unstamped_frames == 0
+            )
+            rates_ok = rates_ok and passed
+            marker = "OK" if passed else "FAIL"
+            print(
+                f"  [{marker}] {camera_name:<16} {status.fps:.2f} FPS "
+                f"unique={status.unique_frames} duplicate={status.duplicate_frames} "
+                f"unstamped={status.unstamped_frames} age={status.age_s:.3f}s"
+            )
+        if not rates_ok:
+            print(
+                f"All cameras must sustain at least {stream_config.minimum_fps:g} FPS.",
+                file=sys.stderr,
+            )
+            return 4
+        sample = reader.get_latest_sample(require_new_images=False)
         if sample is None:
             print(f"Invalid sample: {reader.last_error}")
-            return 3
+            return 5
         print("\nInput check passed.")
         print(f"  state shape={sample.observation_state.shape}")
         for name, image in sample.images.items():
-            print(f"  {name}: {image.shape}")
+            source = sample.image_sources[name]
+            print(
+                f"  {name}: source={source.width}x{source.height} {source.encoding} "
+                f"step={source.step} -> RGB shape={image.shape}"
+            )
         return 0 if ok else 1
     finally:
         if reader is not None:

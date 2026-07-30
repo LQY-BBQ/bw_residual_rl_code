@@ -16,6 +16,16 @@ ACT 基础策略全部冻结。Residual BC 与 Residual RL 的输入统一为：
 [ACT三路视觉特征, observation.state, action.act]
 ```
 
+第三代相机合同为：
+
+| 相机 | 设备 | 数据集与 ACT 输入 |
+| --- | --- | --- |
+| `env_cam` | 环境 D435 `152222071548` | HWC `(480, 640, 3)` / CHW `(3, 480, 640)` |
+| `left_wrist_cam` | 左 D405 `335122270917` | HWC `(270, 480, 3)` / CHW `(3, 270, 480)` |
+| `right_wrist_cam` | 右 D405 `260322279568` | HWC `(270, 480, 3)` / CHW `(3, 270, 480)` |
+
+训练程序会从数据集的 `meta/info.json` 读取三路尺寸和 FPS，并从 ACT checkpoint 读取三路 CHW 尺寸。两边必须严格符合上表且 FPS 必须为 `30`；特征提取前不做裁剪或缩放。旧相机数据集、旧 ACT checkpoint 和旧视觉缓存会被拒绝，第三代流程需要重新采集并训练 ACT。
+
 视觉特征的计算严格复用 ACT 自身的处理路径：
 
 ```text
@@ -48,18 +58,22 @@ LeRobot ACT preprocessor
 - ACT preprocessor；
 - 三路相机顺序；
 - 数据集帧数。
+- 数据集 FPS（当前必须为 30）；
+- 数据集三路源图像尺寸；
+- ACT 三路输入尺寸；
+- 第三代相机合同版本与 `none_exact_shape` 图像变换标记。
 
-更换 ACT 模型后，旧缓存会被拒绝，必须重新生成。
+更换 ACT 模型、数据集 FPS 或图像尺寸后，不匹配的缓存会被拒绝，必须用 `--rebuild-visual-cache` 重新生成。训练 checkpoint 也会保存 `dataset_fps`，部署端会拒绝不是用 30 FPS 数据训练出的新 checkpoint。
 
 ### 手动生成缓存
 
 ```bash
-cd ~/mycode/bw_residual_rl_code_package/lerobot_bw_rl
+cd ~/mycode/bw_residual_rl_code/lerobot_bw_rl
 
 ./scripts/build_visual_cache.sh \
   --dataset.root ~/robot_datasets/bw_rl_corrections/rl_correction_001 \
   --dataset.repo_id local/rl_correction_001 \
-  --act-policy-path ~/outputs/train/act_pick_block_0617_v2/checkpoints/last/pretrained_model \
+  --act-policy-path ~/outputs/train/act_pick_block_gen3/checkpoints/last/pretrained_model \
   --device cuda \
   --batch-size 16 \
   --dtype float16
@@ -96,7 +110,7 @@ residual_target = 0
 ./scripts/train_bc.sh \
   --dataset.root ~/robot_datasets/bw_rl_corrections/rl_correction_001 \
   --dataset.repo_id local/rl_correction_001 \
-  --act-policy-path ~/outputs/train/act_pick_block_0617_v2/checkpoints/last/pretrained_model \
+  --act-policy-path ~/outputs/train/act_pick_block_gen3/checkpoints/last/pretrained_model \
   --output_dir ~/outputs/train/residual_bc_pick_block \
   --device cuda \
   --steps 20000 \
@@ -140,7 +154,7 @@ done_t     = 数据集 done
 ./scripts/train_sac.sh \
   --dataset.root ~/robot_datasets/bw_rl_corrections/rl_correction_001 \
   --dataset.repo_id local/rl_correction_001 \
-  --act-policy-path ~/outputs/train/act_pick_block_0617_v2/checkpoints/last/pretrained_model \
+  --act-policy-path ~/outputs/train/act_pick_block_gen3/checkpoints/last/pretrained_model \
   --init-from-bc ~/outputs/train/residual_bc_pick_block/checkpoints/last/residual_bc.pt \
   --output_dir ~/outputs/train/residual_rl_pick_block \
   --device cuda \
@@ -199,6 +213,9 @@ residual_lambda
 ACT fingerprint
 三路相机顺序
 ACT视觉特征定义
+数据集三路源图像尺寸
+ACT三路目标图像尺寸
+第三代相机合同版本和 `none_exact_shape` 图像变换标记
 ```
 
 部署时必须使用训练该 residual 策略时完全相同的 ACT checkpoint。

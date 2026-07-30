@@ -1,11 +1,47 @@
 """ROS Image conversion helpers."""
 from __future__ import annotations
 
+import cv2
 import numpy as np
 
 
 class ImageConversionError(ValueError):
     """Raised when a ROS Image message cannot be converted into RGB uint8."""
+
+
+def _packed_rows(
+    msg: object,
+    raw: np.ndarray,
+    *,
+    height: int,
+    width: int,
+    bytes_per_pixel: int,
+    encoding: str,
+) -> np.ndarray:
+    """Return packed image bytes with ROS row padding removed."""
+    packed_row_bytes = width * bytes_per_pixel
+    step_value = getattr(msg, "step", packed_row_bytes)
+    try:
+        step = int(step_value)
+    except (TypeError, ValueError) as exc:
+        raise ImageConversionError(f"Invalid image step for {encoding}: {step_value!r}") from exc
+    if step < packed_row_bytes:
+        raise ImageConversionError(
+            f"Image step for {encoding} is smaller than packed row: {step} < {packed_row_bytes}"
+        )
+    required = height * step
+    if raw.size < required:
+        raise ImageConversionError(
+            f"Image buffer too small for {encoding}: {raw.size} < {required} "
+            f"(height={height}, step={step})"
+        )
+    return raw[:required].reshape(height, step)[:, :packed_row_bytes]
+
+
+def _yuyv_to_rgb(packed: np.ndarray, *, height: int, width: int) -> np.ndarray:
+    """Convert packed Y0 U Y1 V (BT.601 limited range) to RGB."""
+    yuyv = np.ascontiguousarray(packed.reshape(height, width, 2))
+    return cv2.cvtColor(yuyv, cv2.COLOR_YUV2RGB_YUY2)
 
 
 def ros_image_to_rgb(msg: object) -> np.ndarray:
@@ -21,31 +57,39 @@ def ros_image_to_rgb(msg: object) -> np.ndarray:
     raw = np.frombuffer(bytes(data), dtype=np.uint8)
 
     if encoding in {"rgb8", "8uc3"}:
-        expected = height * width * 3
-        if raw.size < expected:
-            raise ImageConversionError(f"Image buffer too small for {encoding}: {raw.size} < {expected}")
-        return np.ascontiguousarray(raw[:expected].reshape(height, width, 3))
+        packed = _packed_rows(
+            msg, raw, height=height, width=width, bytes_per_pixel=3, encoding=encoding
+        )
+        return np.ascontiguousarray(packed.reshape(height, width, 3))
     if encoding == "bgr8":
-        expected = height * width * 3
-        if raw.size < expected:
-            raise ImageConversionError(f"Image buffer too small for bgr8: {raw.size} < {expected}")
-        return np.ascontiguousarray(raw[:expected].reshape(height, width, 3)[:, :, ::-1])
+        packed = _packed_rows(
+            msg, raw, height=height, width=width, bytes_per_pixel=3, encoding=encoding
+        )
+        return np.ascontiguousarray(packed.reshape(height, width, 3)[:, :, ::-1])
     if encoding == "rgba8":
-        expected = height * width * 4
-        if raw.size < expected:
-            raise ImageConversionError(f"Image buffer too small for rgba8: {raw.size} < {expected}")
-        return np.ascontiguousarray(raw[:expected].reshape(height, width, 4)[:, :, :3])
+        packed = _packed_rows(
+            msg, raw, height=height, width=width, bytes_per_pixel=4, encoding=encoding
+        )
+        return np.ascontiguousarray(packed.reshape(height, width, 4)[:, :, :3])
     if encoding == "bgra8":
-        expected = height * width * 4
-        if raw.size < expected:
-            raise ImageConversionError(f"Image buffer too small for bgra8: {raw.size} < {expected}")
-        return np.ascontiguousarray(raw[:expected].reshape(height, width, 4)[:, :, [2, 1, 0]])
+        packed = _packed_rows(
+            msg, raw, height=height, width=width, bytes_per_pixel=4, encoding=encoding
+        )
+        return np.ascontiguousarray(packed.reshape(height, width, 4)[:, :, [2, 1, 0]])
     if encoding in {"mono8", "8uc1"}:
-        expected = height * width
-        if raw.size < expected:
-            raise ImageConversionError(f"Image buffer too small for {encoding}: {raw.size} < {expected}")
-        gray = raw[:expected].reshape(height, width)
+        packed = _packed_rows(
+            msg, raw, height=height, width=width, bytes_per_pixel=1, encoding=encoding
+        )
+        gray = packed.reshape(height, width)
         return np.ascontiguousarray(np.repeat(gray[:, :, None], 3, axis=2))
+    if encoding in {"yuv422_yuy2", "yuyv", "yuy2"}:
+        if width % 2 != 0:
+            raise ImageConversionError(f"YUYV image width must be even, got {width}")
+        packed = _packed_rows(
+            msg, raw, height=height, width=width, bytes_per_pixel=2, encoding=encoding
+        )
+        return np.ascontiguousarray(_yuyv_to_rgb(packed, height=height, width=width))
     raise ImageConversionError(
-        f"Unsupported image encoding {getattr(msg, 'encoding', None)!r}. Publish rgb8 or bgr8 image_raw."
+        f"Unsupported image encoding {getattr(msg, 'encoding', None)!r}. "
+        "Supported encodings: rgb8, bgr8, rgba8, bgra8, mono8, yuv422_yuy2/yuyv/yuy2."
     )

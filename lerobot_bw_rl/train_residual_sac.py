@@ -119,6 +119,8 @@ def load_bc_initialization(path: str | Path) -> tuple[dict[str, Any], dict[str, 
     checkpoint_path = _resolve_checkpoint(path, ("residual_bc.pt", "checkpoint.pt", "last.pt"))
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     config = dict(checkpoint.get("config", {}))
+    if int(config.get("format_version", -1)) != 3:
+        raise ValueError("--init-from-bc requires a third-generation residual BC checkpoint")
     if config.get("policy_type") != "residual_bc":
         raise ValueError(f"--init-from-bc requires a residual_bc checkpoint, got {config.get('policy_type')}")
     state_dict = checkpoint.get("actor")
@@ -138,6 +140,7 @@ def initialize_actor_from_bc(
     act_fingerprint_value: str,
     residual_lambda: float,
     residual_limits: np.ndarray,
+    camera_contract_metadata: dict[str, Any] | None = None,
 ) -> None:
     expected = {
         "obs_dim": obs_dim,
@@ -150,6 +153,12 @@ def initialize_actor_from_bc(
         if bc_config.get(key) != value:
             raise ValueError(
                 f"Residual BC initialization mismatch for {key}: checkpoint={bc_config.get(key)!r}, expected={value!r}"
+            )
+    for key, value in (camera_contract_metadata or {}).items():
+        if bc_config.get(key) != value:
+            raise ValueError(
+                f"Residual BC camera contract mismatch for {key}: "
+                f"checkpoint={bc_config[key]!r}, expected={value!r}"
             )
     bc_lambda = float(bc_config.get("residual_lambda", float("nan")))
     if not np.isclose(bc_lambda, residual_lambda):
@@ -256,6 +265,16 @@ def main() -> int:
             act_fingerprint_value=dataset.act_fingerprint,
             residual_lambda=args.residual_lambda,
             residual_limits=limits,
+            camera_contract_metadata={
+                key: visual_cache.metadata.get(key)
+                for key in (
+                    "dataset_fps",
+                    "source_image_shapes",
+                    "policy_image_shapes",
+                    "camera_contract_version",
+                    "image_transform",
+                )
+            },
         )
         print(f"Initialized SAC actor trunk and mean head from: {bc_path}")
     q1 = Critic(obs_dim, action_dim, args.hidden_dims).to(device)
@@ -272,7 +291,7 @@ def main() -> int:
     target_entropy = float(args.target_entropy if args.target_entropy is not None else -action_dim)
 
     config: dict[str, Any] = {
-        "format_version": 2,
+        "format_version": 3,
         "policy_type": "residual_rl",
         "algorithm": "offline_sac_cql",
         "obs_mode": "act_visual_state_act",
@@ -288,6 +307,11 @@ def main() -> int:
         "act_fingerprint": dataset.act_fingerprint,
         "image_keys": dataset.image_keys,
         "visual_feature_definition": visual_cache.metadata["feature_definition"],
+        "dataset_fps": visual_cache.metadata.get("dataset_fps"),
+        "source_image_shapes": visual_cache.metadata.get("source_image_shapes"),
+        "policy_image_shapes": visual_cache.metadata.get("policy_image_shapes"),
+        "camera_contract_version": visual_cache.metadata.get("camera_contract_version"),
+        "image_transform": visual_cache.metadata.get("image_transform"),
         "act_parameters_frozen": True,
         "bc_loss_weight": float(args.bc_loss_weight),
         "cql_alpha": float(args.cql_alpha),

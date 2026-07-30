@@ -42,7 +42,17 @@ RL 模式检查：
   --mode rl
 ```
 
-`check_topics.sh` 会检查配置中的 topic 是否存在、类型是否匹配，并尝试组出一帧样本。如果有缺失关节、未知关节名、图像编码不支持，采集时该帧也会被认为无效。
+`check_topics.sh` 会检查配置中的 topic、消息类型和图像契约，并用 2 秒窗口统计 ROS header 时间戳去重后的帧率。任一路低于 `28.5 FPS`、图像超过 `0.15s` 未更新、header 时间戳为零或规格不匹配都会失败。
+
+当前三路相机已经按同时稳定 30 FPS 的最高实测配置适配：
+
+| 数据集相机名 | ROS topic | ROS 输入 | 数据集 RGB shape |
+| --- | --- | --- | --- |
+| `env_cam` | `/camera/env_d435/color/image_raw` | 环境 D435 `640x480`、`rgb8` | `(480, 640, 3)` |
+| `left_wrist_cam` | `/camera/left_d405/color/image_raw` | 左 D405 `480x270`、`rgb8` | `(270, 480, 3)` |
+| `right_wrist_cam` | `/camera/right_d405/color/image_raw` | 右 D405 `480x270`、`rgb8` | `(270, 480, 3)` |
+
+采集器会读取 ROS `Image.step` 并移除行填充。正式采集只在三路相机都出现新 header 时间戳时写帧，不会把旧图重复保存为新的 30 FPS 数据；任一路持续 `0.5s` 没有新帧会终止采集。建议每次正式采集前运行一次 `check_topics.sh`。
 
 ## BC 模式使用
 
@@ -71,7 +81,7 @@ action
 | --- | --- | --- |
 | `observation.state` | `/{robot_sn}/joint_states_fdb` | 按关节名取 `position`，转 `float32`，重排成固定 16 维；不做归一化、缩放、滤波或单位转换 |
 | `action` | `/{robot_sn}/Teleop/joint_angle_solution/smooth` + `/{robot_sn}/Teleop/gripper_pos` | 手臂 14 维 + 夹爪 2 维，按固定 16 维顺序拼接；不做归一化、缩放、滤波或单位转换 |
-| `observation.images.*` | 三路 `sensor_msgs/Image` | 转成 RGB `uint8` HWC；`bgr8` 会翻通道，`rgba/bgra` 去 alpha，`mono8` 复制成三通道 |
+| `observation.images.*` | 三路 `sensor_msgs/Image` | D435 和 D405 的 `rgb8` 转成连续内存的 RGB `uint8` HWC；底层转换器也能解析 `bgr8/rgba8/bgra8/mono8/yuv422_yuy2` |
 
 ## RL 模式使用
 

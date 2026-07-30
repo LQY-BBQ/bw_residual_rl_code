@@ -9,7 +9,7 @@ BC mode keeps the old dataset-check behavior:
 - optionally exports CSV files
 - draws camera contact sheets from saved videos
 
-RL mode is for datasets recorded by `bw_residual_rl_code_package`:
+RL mode is for datasets recorded by `bw_residual_rl_code`:
 - required columns: control_source, is_intervention, action.act,
   action.rl_delta, action.human, action.executed, reward, done, success, timing.*
 - checks action-source consistency, intervention periods, residual target, reward

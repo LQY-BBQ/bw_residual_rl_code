@@ -11,10 +11,12 @@ import os
 from pathlib import Path
 import signal
 import sys
+import threading
 import time
 
 import numpy as np
 import rclpy
+from rclpy.executors import SingleThreadedExecutor
 
 from .action_utils import (
     ActionCSVLogger,
@@ -27,9 +29,13 @@ from .action_utils import (
     vector_to_joint_state,
 )
 from .config import default_config_path, load_config
-from .constants import JOINT_NAMES
+from .constants import (
+    BW_IMAGE_HWC_SHAPES,
+    CAMERA_CONTRACT_VERSION,
+    IMAGE_TRANSFORM,
+    JOINT_NAMES,
+)
 from .policy_loader import (
-    expected_image_shapes_from_policy,
     infer_action,
     infer_action_with_shared_visual_feature,
     load_policy_bundle,
@@ -87,6 +93,67 @@ def _validate_residual_pair(mode: str, act_bundle, residual_bundle) -> None:  # 
             f"Residual visual_feature_dim={residual_bundle.visual_feature_dim}, "
             f"ACT produces {act_bundle.visual_feature_dim}"
         )
+    if residual_bundle.source_image_shapes != BW_IMAGE_HWC_SHAPES:
+        raise ValueError(
+            "Residual checkpoint source image shapes do not match the third-generation BW contract: "
+            f"checkpoint={residual_bundle.source_image_shapes}, expected={BW_IMAGE_HWC_SHAPES}"
+        )
+    if residual_bundle.policy_image_shapes != act_bundle.image_shapes:
+        raise ValueError(
+            "Residual checkpoint ACT image shapes do not match the loaded ACT checkpoint: "
+            f"residual={residual_bundle.policy_image_shapes}, ACT={act_bundle.image_shapes}"
+        )
+    if residual_bundle.camera_contract_version != CAMERA_CONTRACT_VERSION:
+        raise ValueError(
+            "Residual checkpoint camera contract version does not match this runner: "
+            f"checkpoint={residual_bundle.camera_contract_version}, runner={CAMERA_CONTRACT_VERSION}"
+        )
+    if residual_bundle.image_transform != IMAGE_TRANSFORM:
+        raise ValueError(
+            "Residual checkpoint image transform does not match this runner: "
+            f"checkpoint={residual_bundle.image_transform!r}, runner={IMAGE_TRANSFORM!r}"
+        )
+    dataset_fps = getattr(residual_bundle, "dataset_fps", None)
+    if dataset_fps is not None and not np.isclose(dataset_fps, 30.0, rtol=0.0, atol=1e-6):
+        raise ValueError(
+            f"Residual checkpoint was trained at {dataset_fps:g} FPS; BW runtime requires 30 FPS"
+        )
+
+
+def _camera_streams_ready(reader: BWObservationReader, *, spin: bool) -> bool:
+    stream_config = reader.config.inference.camera_stream
+    if stream_config is None:
+        print("ERROR: inference.camera_stream is not configured.", file=sys.stderr)
+        return False
+    source_errors = reader.camera_source_errors()
+    if source_errors:
+        print("ERROR: camera source contract mismatch:", file=sys.stderr)
+        for error in source_errors:
+            print(f"  - {error}", file=sys.stderr)
+        return False
+    print(f"Measuring unique camera frames for {stream_config.rate_measurement_s:.1f}s...")
+    statuses = reader.measure_camera_streams(stream_config.rate_measurement_s, spin=spin)
+    ok = True
+    for camera_name, status in statuses.items():
+        passed = (
+            status.fps >= stream_config.minimum_fps
+            and status.age_s <= stream_config.max_frame_age_s
+            and status.unstamped_frames == 0
+        )
+        ok = ok and passed
+        marker = "OK" if passed else "FAIL"
+        print(
+            f"  [{marker}] {camera_name:<16} {status.fps:.2f} FPS "
+            f"unique={status.unique_frames} duplicate={status.duplicate_frames} "
+            f"unstamped={status.unstamped_frames} age={status.age_s:.3f}s"
+        )
+    if not ok:
+        print(
+            f"ERROR: all cameras must sustain at least {stream_config.minimum_fps:g} FPS "
+            f"with frame age <= {stream_config.max_frame_age_s:g}s.",
+            file=sys.stderr,
+        )
+    return ok
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -121,6 +188,8 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
     reader: BWObservationReader | None = None
+    executor: SingleThreadedExecutor | None = None
+    spin_thread: threading.Thread | None = None
     csv_logger = ActionCSVLogger(config.inference.log_dir)
     step_count = 0
     filter_state = ActionFilterState()
@@ -134,7 +203,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         if config.inference.reset_policy_on_start and hasattr(act_bundle.policy, "reset"):
             act_bundle.policy.reset()
-        expected_shapes = expected_image_shapes_from_policy(act_bundle.policy)
+        expected_shapes = act_bundle.image_shapes
         print(f"ACT policy dir: {act_bundle.policy_dir}")
         print(f"ACT fingerprint: {act_bundle.fingerprint[:16]}...")
         print(f"Device: {act_bundle.device}, use_amp={act_bundle.use_amp}")
@@ -170,33 +239,45 @@ def main(argv: list[str] | None = None) -> int:
         print("\n[2/4] Connecting to ROS2 topics...")
         init_ros(config)
         reader = BWObservationReader(config)
+        executor = SingleThreadedExecutor()
+        executor.add_node(reader)
+        spin_thread = threading.Thread(target=executor.spin, name="bw_ros_executor", daemon=True)
+        spin_thread.start()
         print("\n[3/4] Waiting for complete observation input...")
-        if not reader.wait_for_first_messages(timeout_s=config.inference.warmup_timeout_s):
+        if not reader.wait_for_first_messages(timeout_s=config.inference.warmup_timeout_s, spin=False):
             print("ERROR: timed out waiting for required topics:", file=sys.stderr)
             for topic in reader.missing_inputs():
                 print(f"  - {topic}", file=sys.stderr)
             return 3
 
+        if not _camera_streams_ready(reader, spin=False):
+            return 4
+
         first_sample = None
         deadline = time.monotonic() + max(config.inference.warmup_timeout_s, 1.0)
         while rclpy.ok() and time.monotonic() < deadline:
-            rclpy.spin_once(reader, timeout_sec=0.05)
             first_sample = reader.get_latest_sample(
                 expected_image_shapes=expected_shapes,
-                resize_images=config.inference.resize_images_to_policy_shape,
+                require_new_images=False,
             )
             if first_sample is not None:
                 break
+            time.sleep(0.01)
         if first_sample is None:
             print("ERROR: no complete valid observation could be assembled.", file=sys.stderr)
             if reader.last_error:
                 print(f"Last error: {reader.last_error}", file=sys.stderr)
-            return 4
+            return 5
 
         print("Observation check:")
         print(f"  - observation.state shape={first_sample.observation_state.shape}")
         for camera_name, image in first_sample.images.items():
-            print(f"  - observation.images.{camera_name} shape={image.shape} dtype={image.dtype}")
+            source = first_sample.image_sources[camera_name]
+            print(
+                f"  - observation.images.{camera_name} "
+                f"source={source.width}x{source.height} {source.encoding} step={source.step} "
+                f"-> ACT RGB shape={image.shape} dtype={image.dtype}"
+            )
 
         print("\n[4/4] Running inference loop. Press Ctrl+C to stop.")
         print(f"Mode: {config.inference.mode}")
@@ -206,8 +287,12 @@ def main(argv: list[str] | None = None) -> int:
             print("Dry-run enabled: no output/debug messages are published.")
 
         target_dt = 1.0 / float(config.inference.fps)
+        stream_config = config.inference.camera_stream
+        assert stream_config is not None
         next_time = time.monotonic()
         last_log_time = time.monotonic()
+        missed_deadlines = 0
+        camera_wait_cycles = 0
         zero_delta = np.zeros(len(JOINT_NAMES), dtype=np.float32)
         residual_limits = (
             residual_bundle.residual_limits
@@ -221,20 +306,25 @@ def main(argv: list[str] | None = None) -> int:
         )
 
         while rclpy.ok() and not _SHOULD_STOP:
-            rclpy.spin_once(reader, timeout_sec=0.001)
             now = time.monotonic()
             if now < next_time:
                 time.sleep(min(next_time - now, 0.002))
                 continue
-            next_time += target_dt
             sample = reader.get_latest_sample(
                 expected_image_shapes=expected_shapes,
-                resize_images=config.inference.resize_images_to_policy_shape,
+                require_new_images=stream_config.require_new_frames,
             )
             if sample is None:
+                camera_wait_cycles += 1
                 if reader.last_error:
                     reader.get_logger().warning(f"Skipping invalid observation: {reader.last_error}")
+                time.sleep(0.001)
                 continue
+            sample_time = time.monotonic()
+            lag = sample_time - next_time
+            skipped_deadlines = int(lag / target_dt) if lag >= target_dt else 0
+            missed_deadlines += skipped_deadlines
+            next_time += (skipped_deadlines + 1) * target_dt
 
             try:
                 observation = sample.to_lerobot_observation()
@@ -315,12 +405,21 @@ def main(argv: list[str] | None = None) -> int:
                     elapsed = max(time.monotonic() - last_log_time, 1e-6)
                     recent_hz = config.inference.log_every_n_steps / elapsed
                     last_log_time = time.monotonic()
-                    reader.get_logger().info(
+                    log_message = (
                         f"step={step_count} recent_hz={recent_hz:.1f} mode={config.inference.mode} "
+                        f"missed_deadlines={missed_deadlines} camera_wait_cycles={camera_wait_cycles} "
                         f"delta_abs_max={float(np.max(np.abs(delta_joint))):.5f} "
                         f"left_gripper={float(action_final[JOINT_NAMES.index('left_gripper_joint')]):.6f} "
                         f"right_gripper={float(action_final[JOINT_NAMES.index('right_gripper_joint')]):.6f}"
                     )
+                    if recent_hz < stream_config.minimum_fps:
+                        reader.get_logger().warning(
+                            f"Inference is below the 30 FPS contract: {log_message}"
+                        )
+                    else:
+                        reader.get_logger().info(log_message)
+                    missed_deadlines = 0
+                    camera_wait_cycles = 0
             except Exception as exc:
                 import traceback
 
@@ -335,6 +434,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     finally:
         csv_logger.close()
+        if executor is not None:
+            executor.shutdown(timeout_sec=1.0)
+        if spin_thread is not None:
+            spin_thread.join(timeout=1.0)
         if reader is not None:
             reader.destroy_node()
         if rclpy.ok():

@@ -9,7 +9,14 @@ import numpy as np
 import torch
 from torch import nn
 
-from .constants import JOINT_NAMES
+from .constants import (
+    BW_IMAGE_HWC_SHAPES,
+    BW_IMAGE_KEYS,
+    BW_IMAGE_SHAPES,
+    CAMERA_CONTRACT_VERSION,
+    IMAGE_TRANSFORM,
+    JOINT_NAMES,
+)
 
 LOG_STD_MIN = -20.0
 LOG_STD_MAX = 2.0
@@ -76,6 +83,11 @@ class ResidualPolicyBundle:
     normalization_clip: float
     act_fingerprint: str
     image_keys: tuple[str, ...]
+    source_image_shapes: dict[str, tuple[int, int, int]]
+    policy_image_shapes: dict[str, tuple[int, int]]
+    camera_contract_version: int
+    image_transform: str
+    dataset_fps: float
     checkpoint_path: Path
     config: dict[str, Any]
 
@@ -99,13 +111,11 @@ def load_residual_policy(path: str | Path, *, device: str | torch.device = "cuda
     torch_device = torch.device(device if not isinstance(device, torch.device) else device)
     checkpoint = torch.load(checkpoint_path, map_location=torch_device)
     config: dict[str, Any] = dict(checkpoint.get("config", {}))
+    if int(config.get("format_version", -1)) != 3:
+        raise ValueError("Residual checkpoint is not a third-generation camera checkpoint; retrain it.")
     policy_type = str(config.get("policy_type", "")).lower()
     if policy_type not in {"residual_bc", "residual_rl"}:
-        # Backward compatibility with the first state+action residual SAC package.
-        if "log_std.weight" in checkpoint.get("actor", {}):
-            policy_type = "residual_rl"
-        else:
-            raise ValueError(f"Unsupported residual checkpoint policy_type={policy_type!r}")
+        raise ValueError(f"Unsupported residual checkpoint policy_type={policy_type!r}")
     input_dim = int(config.get("obs_dim", 0))
     action_dim = int(config.get("action_dim", len(JOINT_NAMES)))
     hidden_dims = [int(value) for value in config.get("hidden_dims", [256, 256])]
@@ -132,6 +142,29 @@ def load_residual_policy(path: str | Path, *, device: str | torch.device = "cuda
     visual_feature_dim = int(config.get("visual_feature_dim", input_dim - 32))
     if visual_feature_dim <= 0 or input_dim != visual_feature_dim + 32:
         raise ValueError("Residual checkpoint must use [ACT visual feature, 16-D state, 16-D ACT action]")
+    source_image_shapes = {
+        str(key): tuple(int(value) for value in shape)
+        for key, shape in (config.get("source_image_shapes") or {}).items()
+    }
+    policy_image_shapes = {
+        str(key): tuple(int(value) for value in shape)
+        for key, shape in (config.get("policy_image_shapes") or {}).items()
+    }
+    if image_keys != BW_IMAGE_KEYS:
+        raise ValueError("Residual checkpoint camera order does not match the third-generation BW contract")
+    if source_image_shapes != BW_IMAGE_HWC_SHAPES:
+        raise ValueError("Residual checkpoint source image shapes do not match the third-generation BW contract")
+    if policy_image_shapes != BW_IMAGE_SHAPES:
+        raise ValueError("Residual checkpoint ACT image shapes do not match the third-generation BW contract")
+    camera_contract_version = int(config.get("camera_contract_version", -1))
+    if camera_contract_version != CAMERA_CONTRACT_VERSION:
+        raise ValueError("Residual checkpoint camera contract version is stale; retrain it")
+    image_transform = str(config.get("image_transform", ""))
+    if image_transform != IMAGE_TRANSFORM:
+        raise ValueError("Residual checkpoint must use exact camera shapes without image resizing")
+    dataset_fps = float(config.get("dataset_fps", 0.0))
+    if not np.isclose(dataset_fps, 30.0, rtol=0.0, atol=1e-6):
+        raise ValueError("Residual checkpoint must be trained from a 30 FPS dataset")
     return ResidualPolicyBundle(
         actor=actor,
         policy_type=policy_type,
@@ -146,6 +179,11 @@ def load_residual_policy(path: str | Path, *, device: str | torch.device = "cuda
         normalization_clip=float(stats.get("clip", 10.0)),
         act_fingerprint=str(config.get("act_fingerprint", "")),
         image_keys=image_keys,
+        source_image_shapes=source_image_shapes,
+        policy_image_shapes=policy_image_shapes,
+        camera_contract_version=camera_contract_version,
+        image_transform=image_transform,
+        dataset_fps=dataset_fps,
         checkpoint_path=checkpoint_path,
         config=config,
     )

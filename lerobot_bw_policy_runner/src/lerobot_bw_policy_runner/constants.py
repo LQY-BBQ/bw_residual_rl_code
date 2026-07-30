@@ -23,7 +23,30 @@ ARM_JOINT_NAMES: list[str] = [name for name in JOINT_NAMES if not name.endswith(
 GRIPPER_JOINT_NAMES: list[str] = ["left_gripper_joint", "right_gripper_joint"]
 GRIPPER_SHORT_NAMES: list[str] = ["left_gripper", "right_gripper"]
 DATASET_JOINT_FEATURE_NAMES: list[str] = [f"{name}.pos" for name in JOINT_NAMES]
-CAMERA_NAMES: list[str] = ["env_cam", "left_wrist_cam", "right_wrist_cam"]
+CAMERA_NAMES: tuple[str, ...] = ("env_cam", "left_wrist_cam", "right_wrist_cam")
+CAMERA_TOPICS: dict[str, str] = {
+    "env_cam": "/camera/env_d435/color/image_raw",
+    "left_wrist_cam": "/camera/left_d405/color/image_raw",
+    "right_wrist_cam": "/camera/right_d405/color/image_raw",
+}
+CAMERA_SOURCES: dict[str, tuple[int, int, str]] = {
+    "env_cam": (640, 480, "rgb8"),
+    "left_wrist_cam": (480, 270, "rgb8"),
+    "right_wrist_cam": (480, 270, "rgb8"),
+}
+BW_IMAGE_KEYS: tuple[str, ...] = tuple(
+    f"observation.images.{name}" for name in CAMERA_NAMES
+)
+BW_IMAGE_SHAPES: dict[str, tuple[int, int]] = {
+    f"observation.images.{name}": (height, width)
+    for name, (width, height, _encoding) in CAMERA_SOURCES.items()
+}
+BW_IMAGE_HWC_SHAPES: dict[str, tuple[int, int, int]] = {
+    key: (height, width, 3)
+    for key, (height, width) in BW_IMAGE_SHAPES.items()
+}
+CAMERA_CONTRACT_VERSION = 3
+IMAGE_TRANSFORM = "none_exact_shape"
 JOINT_NAME_ALIASES: dict[str, str] = {
     "left_elbow_pitch_joint": "left_elbow_joint",
     "right_elbow_pitch_joint": "right_elbow_joint",

@@ -19,7 +19,7 @@ OUTPUT_ROOT="${2:-${HOME}/robot_datasets/bw_rl_corrections_viz}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOCAL_PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." 2>/dev/null && pwd || true)"
-DEFAULT_PROJECT_ROOT="${HOME}/mycode/bw_residual_rl_code_package/lerobot_bw_data_collector"
+DEFAULT_PROJECT_ROOT="${HOME}/mycode/bw_residual_rl_code/lerobot_bw_data_collector"
 
 if [ -f "${LOCAL_PROJECT_ROOT}/scripts/check_dataset.sh" ]; then
   PROJECT_ROOT="${LOCAL_PROJECT_ROOT}"

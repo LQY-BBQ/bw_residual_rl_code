@@ -178,7 +178,7 @@ def main() -> int:
     actor = DeterministicResidualActor(dataset.obs_dim, dataset.action_dim, args.hidden_dims).to(device)
     optimizer = torch.optim.Adam(actor.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     config = {
-        "format_version": 2,
+        "format_version": 3,
         "policy_type": "residual_bc",
         "obs_mode": "act_visual_state_act",
         "obs_dim": dataset.obs_dim,
@@ -193,6 +193,11 @@ def main() -> int:
         "act_fingerprint": dataset.act_fingerprint,
         "image_keys": dataset.image_keys,
         "visual_feature_definition": visual_cache.metadata["feature_definition"],
+        "dataset_fps": visual_cache.metadata.get("dataset_fps"),
+        "source_image_shapes": visual_cache.metadata.get("source_image_shapes"),
+        "policy_image_shapes": visual_cache.metadata.get("policy_image_shapes"),
+        "camera_contract_version": visual_cache.metadata.get("camera_contract_version"),
+        "image_transform": visual_cache.metadata.get("image_transform"),
         "act_parameters_frozen": True,
         "intervention_ratio": float(args.intervention_ratio),
         "intervention_loss_weight": float(args.intervention_loss_weight),

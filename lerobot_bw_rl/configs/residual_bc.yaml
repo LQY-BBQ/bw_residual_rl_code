@@ -1,7 +1,7 @@
 # Documentation-only example. CLI arguments remain the authoritative interface.
 dataset_root: ~/robot_datasets/bw_rl_corrections/rl_correction_001
 repo_id: local/rl_correction_001
-act_policy_path: ~/outputs/train/act_pick_block_0617_v2/checkpoints/last/pretrained_model
+act_policy_path: ~/outputs/train/act_pick_block_gen3/checkpoints/last/pretrained_model
 output_dir: ~/outputs/train/residual_bc_pick_block
 steps: 20000
 batch_size: 256
@@ -12,3 +12,5 @@ residual_lambda: 0.2
 residual_limit_default: 0.03
 residual_limit_gripper: 0.03
 visual_feature_mode: cache
+# Dataset and ACT camera shapes must exactly match the third-generation contract.
+# No image resizing is performed while building frozen ACT features.

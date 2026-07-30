@@ -7,6 +7,8 @@ from typing import Any
 
 import yaml
 
+from .constants import CAMERA_NAMES, CAMERA_SOURCES, CAMERA_TOPICS
+
 
 @dataclass(slots=True)
 class RosConfig:
@@ -31,8 +33,22 @@ class RobotConfig:
 
 
 @dataclass(slots=True)
+class CameraSourceConfig:
+    width: int
+    height: int
+    encoding: str
+
+
+@dataclass(slots=True)
 class CameraConfig:
     topics: dict[str, str]
+    sources: dict[str, CameraSourceConfig]
+    expected_fps: float = 30.0
+    minimum_fps: float = 28.5
+    rate_measurement_s: float = 2.0
+    max_frame_age_s: float = 0.15
+    stall_timeout_s: float = 0.5
+    require_new_frames: bool = True
 
 
 @dataclass(slots=True)
@@ -143,6 +159,54 @@ def load_config(
     if not isinstance(camera_topics, dict) or not camera_topics:
         raise ValueError("cameras.topics must be a non-empty mapping")
     camera_topics = {str(name): str(topic) for name, topic in camera_topics.items()}
+    raw_sources = raw_cameras.get("sources", {}) or {}
+    if not isinstance(raw_sources, dict):
+        raise ValueError("cameras.sources must be a mapping")
+    camera_sources: dict[str, CameraSourceConfig] = {}
+    for camera_name, source in raw_sources.items():
+        if camera_name not in camera_topics:
+            raise ValueError(f"cameras.sources contains unknown camera {camera_name!r}")
+        if not isinstance(source, dict):
+            raise ValueError(f"cameras.sources.{camera_name} must be a mapping")
+        width = int(source.get("width", 0))
+        height = int(source.get("height", 0))
+        encoding = str(source.get("encoding", "")).strip().lower()
+        if width <= 0 or height <= 0 or not encoding:
+            raise ValueError(
+                f"cameras.sources.{camera_name} requires positive width/height and an encoding"
+            )
+        camera_sources[str(camera_name)] = CameraSourceConfig(
+            width=width,
+            height=height,
+            encoding=encoding,
+        )
+    missing_camera_sources = sorted(set(camera_topics) - set(camera_sources))
+    if missing_camera_sources:
+        raise ValueError(f"cameras.sources is missing configured cameras: {missing_camera_sources}")
+    if tuple(camera_topics) != CAMERA_NAMES or camera_topics != CAMERA_TOPICS:
+        raise ValueError(
+            "cameras.topics must match the ordered third-generation BW camera contract: "
+            f"{CAMERA_TOPICS}, got {camera_topics}"
+        )
+    configured_sources = {
+        name: (source.width, source.height, source.encoding)
+        for name, source in camera_sources.items()
+    }
+    if tuple(configured_sources) != CAMERA_NAMES or configured_sources != CAMERA_SOURCES:
+        raise ValueError(
+            "cameras.sources must match the ordered third-generation BW camera contract: "
+            f"{CAMERA_SOURCES}, got {configured_sources}"
+        )
+
+    expected_camera_fps = float(raw_cameras.get("expected_fps", 30.0))
+    minimum_camera_fps = float(raw_cameras.get("minimum_fps", expected_camera_fps * 0.95))
+    rate_measurement_s = float(raw_cameras.get("rate_measurement_s", 2.0))
+    max_frame_age_s = float(raw_cameras.get("max_frame_age_s", 0.15))
+    stall_timeout_s = float(raw_cameras.get("stall_timeout_s", 0.5))
+    if expected_camera_fps <= 0 or not 0 < minimum_camera_fps <= expected_camera_fps:
+        raise ValueError("cameras expected_fps/minimum_fps must satisfy 0 < minimum <= expected")
+    if min(rate_measurement_s, max_frame_age_s, stall_timeout_s) <= 0:
+        raise ValueError("camera rate_measurement_s, max_frame_age_s and stall_timeout_s must be positive")
 
     dataset_root_path = Path(dataset_root or raw_dataset.get("root", "~/robot_datasets/bw_lerobot")).expanduser()
     final_task = " ".join(str(task or raw_dataset.get("task", "")).split())
@@ -151,11 +215,24 @@ def load_config(
     final_fps = int(fps if fps is not None else raw_dataset.get("fps", 30))
     if final_fps <= 0:
         raise ValueError(f"dataset.fps must be positive, got {final_fps}")
+    if abs(float(final_fps) - expected_camera_fps) > 1e-6:
+        raise ValueError(
+            f"dataset.fps={final_fps} must match cameras.expected_fps={expected_camera_fps:g}"
+        )
 
     return AppConfig(
         ros=RosConfig(domain_id=int(raw_ros.get("domain_id", 0))),
         robot=RobotConfig(robot_sn=final_robot_sn, topics=robot_topics),
-        cameras=CameraConfig(topics=camera_topics),
+        cameras=CameraConfig(
+            topics=camera_topics,
+            sources=camera_sources,
+            expected_fps=expected_camera_fps,
+            minimum_fps=minimum_camera_fps,
+            rate_measurement_s=rate_measurement_s,
+            max_frame_age_s=max_frame_age_s,
+            stall_timeout_s=stall_timeout_s,
+            require_new_frames=_as_bool(raw_cameras.get("require_new_frames", True)),
+        ),
         dataset=DatasetConfig(
             root=dataset_root_path,
             repo_prefix=_normalize_repo_prefix(str(raw_dataset.get("repo_prefix", "local/bw_mantis"))),

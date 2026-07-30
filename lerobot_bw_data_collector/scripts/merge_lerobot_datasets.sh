@@ -112,8 +112,8 @@ print_usage() {
 
   # 合并普通 ACT 模仿学习数据
   bash ${BASH_SOURCE[0]} \
-    --src ~/robot_datasets/pick_block_0617 \
-    --out ~/robot_datasets/pick_block_0617_merged \
+    --src ~/robot_datasets/pick_block_gen3 \
+    --out ~/robot_datasets/pick_block_gen3_merged \
     --mode bc
 
   # 合并 RL 纠正数据
@@ -1196,7 +1196,7 @@ PYMODE
 
 echo ""
 echo "[NEXT] 建议先运行数据检查程序："
-echo "  cd ${HOME}/mycode/bw_residual_rl_code_package/lerobot_bw_data_collector"
+echo "  cd ${HOME}/mycode/bw_residual_rl_code/lerobot_bw_data_collector"
 echo "  bash scripts/check_dataset.sh \\"
 echo "    ${MERGED_ROOT} \\"
 echo "    --all-episodes \\"

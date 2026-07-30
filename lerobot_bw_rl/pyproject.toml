@@ -7,7 +7,7 @@ name = "lerobot-bw-rl"
 version = "0.2.0"
 description = "Frozen-ACT visual residual BC and offline residual SAC/CQL training for BW"
 requires-python = ">=3.10"
-dependencies = ["numpy", "pandas", "torch", "pyarrow"]
+dependencies = ["numpy", "pandas", "torch", "pyarrow", "opencv-python-headless>=4.5"]
 
 [tool.setuptools]
 py-modules = [

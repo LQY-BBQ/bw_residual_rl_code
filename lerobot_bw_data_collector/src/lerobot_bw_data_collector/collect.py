@@ -62,6 +62,39 @@ def _add_pending_frame(
     )
 
 
+def _camera_streams_ready(reader: BWTopicReader) -> bool:
+    config = reader.config.cameras
+    source_errors = reader.camera_source_errors()
+    if source_errors:
+        print("ERROR: camera source contract mismatch:", file=sys.stderr)
+        for error in source_errors:
+            print(f"  - {error}", file=sys.stderr)
+        return False
+    print(f"Measuring unique camera frames for {config.rate_measurement_s:.1f}s...")
+    statuses = reader.measure_camera_streams(config.rate_measurement_s)
+    ok = True
+    for camera_name, status in statuses.items():
+        passed = (
+            status.fps >= config.minimum_fps
+            and status.age_s <= config.max_frame_age_s
+            and status.unstamped_frames == 0
+        )
+        ok = ok and passed
+        marker = "OK" if passed else "FAIL"
+        print(
+            f"  [{marker}] {camera_name:<16} {status.fps:.2f} FPS "
+            f"unique={status.unique_frames} duplicate={status.duplicate_frames} "
+            f"unstamped={status.unstamped_frames} age={status.age_s:.3f}s"
+        )
+    if not ok:
+        print(
+            f"ERROR: all cameras must sustain at least {config.minimum_fps:g} FPS "
+            f"with frame age <= {config.max_frame_age_s:g}s.",
+            file=sys.stderr,
+        )
+    return ok
+
+
 def main(argv: list[str] | None = None) -> int:
     global _SHOULD_STOP
     args = parse_args(argv)
@@ -98,18 +131,21 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  - {topic}", file=sys.stderr)
             return 2
 
+        if not _camera_streams_ready(reader):
+            return 3
+
         first_sample = None
         deadline = time.monotonic() + max(config.record.warmup_timeout_s, 1.0)
         while rclpy.ok() and time.monotonic() < deadline:
             rclpy.spin_once(reader, timeout_sec=0.05)
-            first_sample = reader.get_latest_sample()
+            first_sample = reader.get_latest_sample(require_new_images=False)
             if first_sample is not None:
                 break
         if first_sample is None:
             print("ERROR: no complete valid sample could be assembled.", file=sys.stderr)
             if reader.last_error:
                 print(f"Last error: {reader.last_error}", file=sys.stderr)
-            return 3
+            return 4
 
         print("[2/3] Creating LeRobot dataset...")
         handle = create_lerobot_dataset(config, first_sample, session_name=args.session_name, overwrite=args.overwrite)
@@ -131,19 +167,31 @@ def main(argv: list[str] | None = None) -> int:
 
             next_time = time.monotonic()
             last_log_time = time.monotonic()
+            last_fresh_sample_time = time.monotonic()
+            missed_capture_deadlines = 0
             while rclpy.ok() and not _SHOULD_STOP:
                 rclpy.spin_once(reader, timeout_sec=0.001)
                 now = time.monotonic()
                 if now < next_time:
                     time.sleep(min(next_time - now, 0.002))
                     continue
-                next_time += target_dt
-
-                sample = reader.get_latest_sample()
+                sample = reader.get_latest_sample(require_new_images=config.cameras.require_new_frames)
                 if sample is None:
                     if reader.last_error:
                         print(f"Skipping invalid sample: {reader.last_error}", file=sys.stderr)
+                    if time.monotonic() - last_fresh_sample_time > config.cameras.stall_timeout_s:
+                        raise RuntimeError(
+                            "Camera stream stalled while recording: "
+                            f"{reader.last_wait_reason or reader.last_error or 'no complete fresh image set'}"
+                        )
+                    time.sleep(0.001)
                     continue
+                sample_time = time.monotonic()
+                last_fresh_sample_time = sample_time
+                lag = sample_time - next_time
+                skipped_deadlines = int(lag / target_dt) if lag >= target_dt else 0
+                missed_capture_deadlines += skipped_deadlines
+                next_time += (skipped_deadlines + 1) * target_dt
 
                 # Save the previous sample first. The new sample will become the
                 # pending frame, so any key pressed in this cycle labels the new
@@ -164,8 +212,14 @@ def main(argv: list[str] | None = None) -> int:
 
                 if config.record.log_every_n_frames > 0 and frame_count > 0 and frame_count % config.record.log_every_n_frames == 0:
                     elapsed = max(time.monotonic() - last_log_time, 1e-6)
-                    print(f"Recorded {frame_count} frames ({config.record.log_every_n_frames / elapsed:.1f} fps recent)")
+                    recent_fps = config.record.log_every_n_frames / elapsed
+                    level = "OK" if recent_fps >= config.cameras.minimum_fps else "LOW"
+                    print(
+                        f"Recorded {frame_count} frames ({recent_fps:.1f} fps recent, "
+                        f"camera_rate={level}, missed_deadlines={missed_capture_deadlines})"
+                    )
                     last_log_time = time.monotonic()
+                    missed_capture_deadlines = 0
 
                 if args.max_frames > 0 and (frame_count + 1) >= args.max_frames:
                     print(f"Reached --max-frames {args.max_frames}; saving episode as failure/timeout.")
@@ -185,7 +239,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if frame_count <= 0:
             print("No frames recorded; nothing to save.")
-            return 4
+            return 5
 
         print(f"Saving episode with {frame_count} frames... stop_reason={stop_reason}")
         dataset.save_episode()

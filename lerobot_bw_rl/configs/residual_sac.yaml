@@ -1,7 +1,7 @@
 # Documentation-only example. CLI arguments remain the authoritative interface.
 dataset_root: ~/robot_datasets/bw_rl_corrections/rl_correction_001
 repo_id: local/rl_correction_001
-act_policy_path: ~/outputs/train/act_pick_block_0617_v2/checkpoints/last/pretrained_model
+act_policy_path: ~/outputs/train/act_pick_block_gen3/checkpoints/last/pretrained_model
 init_from_bc: ~/outputs/train/residual_bc_pick_block/checkpoints/last/residual_bc.pt
 output_dir: ~/outputs/train/residual_rl_pick_block
 steps: 30000
@@ -13,3 +13,4 @@ residual_limit_gripper: 0.03
 bc_loss_weight: 0.1
 cql_alpha: 0.1
 visual_feature_mode: cache
+# Uses the same strict third-generation camera contract recorded by Residual BC.

@@ -28,7 +28,7 @@ pip install pandas pyarrow matplotlib opencv-python
 进入数据采集工程：
 
 ```bash
-cd ~/mycode/bw_residual_rl_code_package/lerobot_bw_data_collector
+cd ~/mycode/bw_residual_rl_code/lerobot_bw_data_collector
 ```
 
 默认检查全部 episode：
@@ -130,7 +130,7 @@ episode_000/
 
 ## RL 检查逻辑
 
-`bw_residual_rl_code_package` 中保存的 `action.rl_delta` 是关节空间 residual delta，不是归一化 `[-1, 1]` 动作。
+`bw_residual_rl_code` 中保存的 `action.rl_delta` 是关节空间 residual delta，不是归一化 `[-1, 1]` 动作。
 
 脚本会检查：
 

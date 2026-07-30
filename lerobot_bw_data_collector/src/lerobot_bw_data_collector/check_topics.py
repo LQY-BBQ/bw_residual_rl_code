@@ -78,23 +78,57 @@ def main(argv: list[str] | None = None) -> int:
             for topic in reader.missing_inputs():
                 print(f"  - {topic}")
             return 2
+        source_errors = reader.camera_source_errors()
+        if source_errors:
+            print("\nCamera source contract mismatch:", file=sys.stderr)
+            for error in source_errors:
+                print(f"  - {error}", file=sys.stderr)
+            return 3
+        print(f"\nMeasuring unique camera frames for {config.cameras.rate_measurement_s:.1f}s...")
+        statuses = reader.measure_camera_streams(config.cameras.rate_measurement_s)
+        rates_ok = True
+        for camera_name, status in statuses.items():
+            passed = (
+                status.fps >= config.cameras.minimum_fps
+                and status.age_s <= config.cameras.max_frame_age_s
+                and status.unstamped_frames == 0
+            )
+            rates_ok = rates_ok and passed
+            marker = "OK" if passed else "FAIL"
+            print(
+                f"  [{marker}] {camera_name:<16} {status.fps:.2f} FPS "
+                f"unique={status.unique_frames} duplicate={status.duplicate_frames} "
+                f"unstamped={status.unstamped_frames} age={status.age_s:.3f}s"
+            )
+        if not rates_ok:
+            print(
+                f"All cameras must sustain at least {config.cameras.minimum_fps:g} FPS.",
+                file=sys.stderr,
+            )
+            return 4
         sample = None
         deadline = time.monotonic() + 2.0
         while rclpy.ok() and time.monotonic() < deadline:
             rclpy.spin_once(reader, timeout_sec=0.05)
-            sample = reader.get_latest_sample()
+            sample = reader.get_latest_sample(require_new_images=False)
             if sample is not None:
                 break
         if sample is None:
             print("\nTopics publish, but a valid sample cannot be assembled.", file=sys.stderr)
             if reader.last_error:
                 print(f"Last error: {reader.last_error}", file=sys.stderr)
-            return 3
+            return 5
         print("\nMessage content check:")
         print(f"  [OK] observation.state shape={sample.observation_state.shape}")
         print(f"  [OK] action            shape={sample.action.shape}")
+        camera_info = reader.camera_image_info()
         for camera_name, image in sample.images.items():
-            print(f"  [OK] {camera_name:<16} shape={image.shape} dtype={image.dtype}")
+            source = camera_info[camera_name]
+            print(
+                f"  [OK] {camera_name:<16} "
+                f"source={source['width']}x{source['height']} {source['encoding']} step={source['step']} "
+                f"-> RGB shape={image.shape} dtype={image.dtype}"
+            )
         if config.dataset.mode == "rl":
             print(f"  [OK] control_source={sample.control_source} is_intervention={sample.is_intervention}")
             print(f"  [OK] action.act       shape={sample.action_act.shape}")

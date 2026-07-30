@@ -7,7 +7,7 @@ name = "lerobot-bw-data-collector"
 version = "0.2.0"
 description = "BW robot LeRobot collector with BC and residual-RL data modes"
 requires-python = ">=3.10"
-dependencies = ["numpy", "pyyaml"]
+dependencies = ["numpy", "pyyaml", "opencv-python-headless>=4.5"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

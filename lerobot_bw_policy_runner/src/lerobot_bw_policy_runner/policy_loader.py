@@ -11,11 +11,7 @@ from typing import Any
 import numpy as np
 import torch
 
-BW_IMAGE_KEYS: tuple[str, ...] = (
-    "observation.images.env_cam",
-    "observation.images.left_wrist_cam",
-    "observation.images.right_wrist_cam",
-)
+from .constants import BW_IMAGE_KEYS, BW_IMAGE_SHAPES
 
 
 @dataclass(slots=True)
@@ -27,6 +23,7 @@ class PolicyBundle:
     use_amp: bool
     policy_dir: Path
     image_keys: tuple[str, ...]
+    image_shapes: dict[str, tuple[int, int]]
     fingerprint: str
 
     @property
@@ -119,9 +116,9 @@ def validate_bw_act_policy(policy: Any) -> tuple[str, ...]:
     if cfg is None or str(getattr(cfg, "type", "")).lower() != "act":
         raise TypeError("The base policy must be a LeRobot ACT policy")
     configured = tuple(str(key) for key in getattr(cfg, "image_features", {}).keys())
-    if set(configured) != set(BW_IMAGE_KEYS) or len(configured) != len(BW_IMAGE_KEYS):
+    if configured != BW_IMAGE_KEYS:
         raise ValueError(
-            "This runner requires exactly the three BW ACT cameras "
+            "This runner requires the exact third-generation BW camera order "
             f"{list(BW_IMAGE_KEYS)}, checkpoint contains {list(configured)}"
         )
     if int(cfg.robot_state_feature.shape[0]) != 16 or int(cfg.action_feature.shape[0]) != 16:
@@ -129,6 +126,12 @@ def validate_bw_act_policy(policy: Any) -> tuple[str, ...]:
     model = getattr(policy, "model", None)
     if model is None or not hasattr(model, "encoder_img_feat_input_proj"):
         raise AttributeError("ACT model.encoder_img_feat_input_proj is required; use LeRobot 0.4.4")
+    shapes = expected_image_shapes_from_policy(policy)
+    if shapes != BW_IMAGE_SHAPES:
+        raise ValueError(
+            "ACT checkpoint image shapes do not match the third-generation BW camera contract: "
+            f"expected={BW_IMAGE_SHAPES}, checkpoint={shapes}. Retrain ACT with the new dataset."
+        )
     return BW_IMAGE_KEYS
 
 
@@ -148,6 +151,7 @@ def load_policy_bundle(policy_path: str | Path, *, device: str = "cuda", use_amp
     if hasattr(policy, "reset"):
         policy.reset()
     image_keys = validate_bw_act_policy(policy)
+    image_shapes = expected_image_shapes_from_policy(policy)
     preprocessor_overrides = _device_processor_overrides(policy_dir, "policy_preprocessor.json", str(torch_device))
     postprocessor_overrides = _device_processor_overrides(policy_dir, "policy_postprocessor.json", "cpu")
     preprocessor, postprocessor = make_pre_post_processors(
@@ -164,18 +168,25 @@ def load_policy_bundle(policy_path: str | Path, *, device: str = "cuda", use_amp
         use_amp=bool(policy_cfg.use_amp),
         policy_dir=policy_dir,
         image_keys=image_keys,
+        image_shapes=image_shapes,
         fingerprint=act_policy_fingerprint(policy_dir),
     )
 
 
 def expected_image_shapes_from_policy(policy: Any) -> dict[str, tuple[int, int]]:
+    """Read and validate the exact CHW camera shapes declared by ACT."""
     shapes: dict[str, tuple[int, int]] = {}
     cfg = getattr(policy, "config", None)
     image_features = getattr(cfg, "image_features", {}) if cfg is not None else {}
-    for key, feature in image_features.items():
-        shape = tuple(getattr(feature, "shape", ()) or ())
-        if len(shape) == 3:
-            shapes[str(key)] = (int(shape[1]), int(shape[2]))
+    for key in BW_IMAGE_KEYS:
+        feature = image_features.get(key)
+        shape = tuple(getattr(feature, "shape", ()) or ()) if feature is not None else ()
+        if len(shape) != 3 or int(shape[0]) != 3:
+            raise ValueError(f"ACT image feature {key!r} must have CHW shape with 3 channels, got {shape}")
+        height, width = int(shape[1]), int(shape[2])
+        if height <= 0 or width <= 0:
+            raise ValueError(f"ACT image feature {key!r} has invalid size {(height, width)}")
+        shapes[key] = (height, width)
     return shapes
 
 
@@ -188,6 +199,15 @@ def prepare_observation(
 ) -> dict[str, Any]:
     prepare_observation_for_inference = _import_prepare_observation_for_inference()
     copied = {key: np.asarray(value).copy() for key, value in observation.items()}
+    for key, (height, width) in bundle.image_shapes.items():
+        if key not in copied:
+            raise KeyError(f"Observation is missing required ACT image: {key}")
+        expected_shape = (height, width, 3)
+        if copied[key].shape != expected_shape:
+            raise ValueError(
+                f"Image {key!r} has shape={copied[key].shape}, expected exact third-generation "
+                f"ACT shape={expected_shape}; runtime resizing is disabled"
+            )
     prepared = prepare_observation_for_inference(copied, bundle.device, task=task, robot_type=robot_type)
     return bundle.preprocessor(prepared)
 

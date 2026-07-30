@@ -11,7 +11,7 @@ robot:
     state: /{robot_sn}/joint_states_fdb
     control_source: /{robot_sn}/Teleop/control_source
     cameras:
-      env_cam: /env_camera/image_raw
+      env_cam: /camera/env_d435/color/image_raw
       left_wrist_cam: /camera/left_d405/color/image_raw
       right_wrist_cam: /camera/right_d405/color/image_raw
 
@@ -33,13 +33,25 @@ inference:
   robot_type: bw_runtime
   warmup_timeout_s: 10.0
   require_all_cameras: true
-  resize_images_to_policy_shape: true
   dry_run: false
   reset_policy_on_start: true
   log_every_n_steps: 30
   log_dir: null
   arm_velocity_limit: null
   gripper_name_style: joint
+
+  # Current mantis_camera_ros contract. Every inference step consumes a unique
+  # frame from all three 30 FPS streams; the runner converts sources to RGB.
+  camera_stream:
+    sources:
+      env_cam: {width: 640, height: 480, encoding: rgb8}
+      left_wrist_cam: {width: 480, height: 270, encoding: rgb8}
+      right_wrist_cam: {width: 480, height: 270, encoding: rgb8}
+    expected_fps: 30.0
+    minimum_fps: 28.5
+    rate_measurement_s: 2.0
+    max_frame_age_s: 0.15
+    require_new_frames: true
 
   residual:
     policy_path: null

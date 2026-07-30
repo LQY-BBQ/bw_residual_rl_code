@@ -32,7 +32,17 @@ GRIPPER_JOINT_NAMES: list[str] = ["left_gripper_joint", "right_gripper_joint"]
 GRIPPER_SHORT_NAMES: list[str] = ["left_gripper", "right_gripper"]
 DATASET_JOINT_FEATURE_NAMES: list[str] = [f"{name}.pos" for name in JOINT_NAMES]
 
-CAMERA_NAMES: list[str] = ["env_cam", "left_wrist_cam", "right_wrist_cam"]
+CAMERA_NAMES: tuple[str, ...] = ("env_cam", "left_wrist_cam", "right_wrist_cam")
+CAMERA_TOPICS: dict[str, str] = {
+    "env_cam": "/camera/env_d435/color/image_raw",
+    "left_wrist_cam": "/camera/left_d405/color/image_raw",
+    "right_wrist_cam": "/camera/right_d405/color/image_raw",
+}
+CAMERA_SOURCES: dict[str, tuple[int, int, str]] = {
+    "env_cam": (640, 480, "rgb8"),
+    "left_wrist_cam": (480, 270, "rgb8"),
+    "right_wrist_cam": (480, 270, "rgb8"),
+}
 
 JOINT_NAME_ALIASES: dict[str, str] = {
     "left_elbow_pitch_joint": "left_elbow_joint",

@@ -157,7 +157,18 @@ dry-run 通过后：
   --fps 30
 ```
 
-### 2. 终端 D：采集 correction
+### 2. 终端 D：验证执行动作
+
+```bash
+cd /home/lanchong/mycode/bw_residual_rl_code/lerobot_bw_policy_runner
+
+./scripts/run_action_visualizer.sh \
+  --robot-sn BW_IZN3E0FU \
+  --window-seconds 10 \
+  --refresh-hz 20
+```
+
+### 3. 终端 E：采集 correction
 
 必须在 policy runner 已运行后检查 RL 话题：
 

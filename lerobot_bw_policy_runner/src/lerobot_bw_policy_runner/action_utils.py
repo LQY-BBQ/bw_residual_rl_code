@@ -155,6 +155,7 @@ class ActionCSVLogger:
                     "gripper_hysteresis_enabled",
                     "gripper_open_value",
                     "gripper_close_value",
+                    "gripper_act_confirm_frames",
                     "gripper_residual_confidence_threshold",
                     "gripper_residual_confirm_frames",
                     "gripper_min_hold_s",
@@ -184,6 +185,7 @@ class ActionCSVLogger:
                 {
                     "gripper_open_value": config.open_value,
                     "gripper_close_value": config.close_value,
+                    "gripper_act_confirm_frames": config.act_confirm_frames,
                     "gripper_residual_confidence_threshold": config.residual_confidence_threshold,
                     "gripper_residual_confirm_frames": config.residual_confirm_frames,
                     "gripper_min_hold_s": config.min_hold_s,

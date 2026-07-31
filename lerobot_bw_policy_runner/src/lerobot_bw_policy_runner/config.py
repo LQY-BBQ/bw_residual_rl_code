@@ -76,15 +76,16 @@ class ActionClampConfig:
 @dataclass(slots=True)
 class GripperHysteresisConfig:
     enabled: bool = True
-    open_threshold: float = 0.20
+    open_threshold: float = 0.50
     close_threshold: float = 0.40
-    single_threshold: float = 0.30
+    single_threshold: float = 0.45
 
 
 @dataclass(slots=True)
 class GripperControlConfig:
     open_value: float = 0.0
     close_value: float = 0.8
+    act_confirm_frames: int = 3
     residual_confidence_threshold: float = 0.70
     residual_confirm_frames: int = 3
     min_hold_s: float = 0.30
@@ -291,13 +292,14 @@ def load_config(config_path: str | Path, *, robot_sn: str | None = None, policy_
             if gripper_hysteresis is not None
             else _as_bool(raw_gripper_hysteresis.get("enabled", True))
         ),
-        open_threshold=float(raw_gripper_hysteresis.get("open_threshold", 0.20)),
+        open_threshold=float(raw_gripper_hysteresis.get("open_threshold", 0.50)),
         close_threshold=float(raw_gripper_hysteresis.get("close_threshold", 0.40)),
-        single_threshold=float(raw_gripper_hysteresis.get("single_threshold", 0.30)),
+        single_threshold=float(raw_gripper_hysteresis.get("single_threshold", 0.45)),
     )
     gripper_config = GripperControlConfig(
         open_value=float(raw_gripper.get("open_value", 0.0)),
         close_value=float(raw_gripper.get("close_value", 0.8)),
+        act_confirm_frames=int(raw_gripper.get("act_confirm_frames", 3)),
         residual_confidence_threshold=float(raw_gripper.get("residual_confidence_threshold", 0.70)),
         residual_confirm_frames=int(raw_gripper.get("residual_confirm_frames", 3)),
         min_hold_s=float(raw_gripper.get("min_hold_s", 0.30)),
@@ -316,19 +318,17 @@ def load_config(config_path: str | Path, *, robot_sn: str | None = None, policy_
         raise ValueError("inference.gripper values and thresholds must be finite")
     if gripper_config.open_value != 0.0 or gripper_config.close_value != 0.8:
         raise ValueError("inference.gripper command endpoints are fixed at open_value=0.0 and close_value=0.8")
-    if not hysteresis_config.open_threshold < hysteresis_config.single_threshold < hysteresis_config.close_threshold:
-        raise ValueError(
-            "gripper thresholds must satisfy open_threshold < single_threshold < close_threshold"
-        )
-    if not (
-        gripper_config.open_value
-        <= hysteresis_config.open_threshold
-        < hysteresis_config.close_threshold
-        <= gripper_config.close_value
-    ):
-        raise ValueError("inference.gripper hysteresis thresholds must be within [open_value, close_value]")
+    thresholds = (
+        hysteresis_config.open_threshold,
+        hysteresis_config.single_threshold,
+        hysteresis_config.close_threshold,
+    )
+    if not all(gripper_config.open_value <= value <= gripper_config.close_value for value in thresholds):
+        raise ValueError("inference.gripper thresholds must each be within [open_value, close_value]")
     if not 0.0 <= gripper_config.residual_confidence_threshold <= 1.0:
         raise ValueError("inference.gripper.residual_confidence_threshold must be in [0, 1]")
+    if gripper_config.act_confirm_frames < 1:
+        raise ValueError("inference.gripper.act_confirm_frames must be at least 1")
     if gripper_config.residual_confirm_frames < 1:
         raise ValueError("inference.gripper.residual_confirm_frames must be at least 1")
     if gripper_config.min_hold_s < 0:

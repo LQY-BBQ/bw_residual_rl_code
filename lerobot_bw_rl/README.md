@@ -128,9 +128,10 @@ residual_target = 0
   --residual-lambda 0.2 \
   --residual-limit-default 0.03 \
   --gripper-hysteresis \
-  --gripper-open-threshold 0.20 \
-  --gripper-single-threshold 0.30 \
+  --gripper-open-threshold 0.50 \
+  --gripper-single-threshold 0.45 \
   --gripper-close-threshold 0.40 \
+  --gripper-act-confirm-frames 3 \
   --save_freq 2000 \
   --log_freq 100
 ```

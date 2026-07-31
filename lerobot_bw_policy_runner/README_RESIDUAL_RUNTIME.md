@@ -109,10 +109,10 @@ action_final     = 手臂经过 clamp/smoothing，夹爪经过确认/保持后�
 gripper_residual_class = 左右夹爪原始分类，0=KEEP_BASE、1=FORCE_OPEN、2=FORCE_CLOSE
 ```
 
-夹爪最终只发布 `0.0`（OPEN）或 `0.8`（CLOSE）。默认开启 ACT 双阈值迟滞：OPEN 达到
-`0.40` 才关闭，CLOSE 降到 `0.20` 才打开；`--no-gripper-hysteresis` 可切为单阈值
-`0.30`。命令行显式值优先于 YAML。无论是否启用双阈值，Residual 都需要连续 3 帧同类且
-置信度至少 `0.70`，最终状态切换后保持至少 `0.30s`。
+夹爪最终只发布 `0.0`（OPEN）或 `0.8`（CLOSE）。默认开启 ACT 双阈值迟滞：OPEN 连续
+3 帧达到 `0.40` 才关闭，CLOSE 连续 3 帧降到 `0.50` 才打开；`--no-gripper-hysteresis`
+可切为单阈值 `0.45`，仍保留连续帧确认。命令行显式值优先于 YAML。Residual 覆盖也需要
+连续 3 帧同类且置信度至少 `0.70`，最终状态切换后保持至少 `0.30s`。
 
 ## 3. 只运行 ACT
 

@@ -270,9 +270,11 @@ def main() -> int:
             normalization_clip=args.normalization_clip,
             use_only_interventions=args.use_only_interventions,
             gripper_hysteresis_enabled=bool(gripper_control.get("hysteresis_enabled", True)),
-            gripper_open_threshold=float(gripper_control.get("open_threshold", 0.20)),
+            gripper_open_threshold=float(gripper_control.get("open_threshold", 0.50)),
             gripper_close_threshold=float(gripper_control.get("close_threshold", 0.40)),
-            gripper_single_threshold=float(gripper_control.get("single_threshold", 0.30)),
+            gripper_single_threshold=float(gripper_control.get("single_threshold", 0.45)),
+            # Old format-v4 BC checkpoints predate ACT confirmation and imply one frame.
+            gripper_act_confirm_frames=int(gripper_control.get("act_confirm_frames", 1)),
         )
     )
     if dataset.observation_stats is None:

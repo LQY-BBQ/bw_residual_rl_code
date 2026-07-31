@@ -79,6 +79,33 @@ def test_episode_gripper_discretization_modes() -> None:
     np.testing.assert_array_equal(single, [[0, 1], [1, 1], [1, 0]])
 
 
+def test_gripper_discretization_confirms_act_transitions() -> None:
+    commands = np.asarray(
+        [
+            [0.8, 0.0],
+            [0.49, 0.41],
+            [0.49, 0.39],
+            [0.49, 0.41],
+            [0.39, 0.41],
+            [0.39, 0.41],
+        ],
+        dtype=np.float32,
+    )
+    states = discretize_gripper_commands(
+        commands,
+        np.zeros(len(commands), dtype=np.int64),
+        hysteresis_enabled=True,
+        open_threshold=0.50,
+        close_threshold=0.40,
+        single_threshold=0.45,
+        confirm_frames=3,
+    )
+    np.testing.assert_array_equal(
+        states,
+        [[1, 0], [1, 0], [1, 0], [0, 0], [0, 0], [0, 1]],
+    )
+
+
 def test_gripper_labels_ignore_non_intervention_zero_human_actions() -> None:
     act = np.zeros((5, 16), dtype=np.float32)
     executed = np.zeros((5, 16), dtype=np.float32)

@@ -250,6 +250,7 @@ def main(argv: list[str] | None = None) -> int:
                 ("hysteresis_enabled", runtime_hysteresis.enabled),
                 ("open_value", config.inference.gripper.open_value),
                 ("close_value", config.inference.gripper.close_value),
+                ("act_confirm_frames", config.inference.gripper.act_confirm_frames),
                 (
                     "residual_confidence_threshold",
                     config.inference.gripper.residual_confidence_threshold,
@@ -266,7 +267,7 @@ def main(argv: list[str] | None = None) -> int:
                     bool(training_value) != bool(runtime_value)
                     if key == "hysteresis_enabled"
                     else int(training_value) != int(runtime_value)
-                    if key == "residual_confirm_frames"
+                    if key in {"act_confirm_frames", "residual_confirm_frames"}
                     else not np.isclose(float(training_value), float(runtime_value), rtol=0.0, atol=1e-9)
                 ):
                     mismatch.append(f"{key}: runtime={runtime_value}, training={training_value}")
@@ -332,7 +333,8 @@ def main(argv: list[str] | None = None) -> int:
             f"{gripper_config.hysteresis.close_threshold:g} "
             f"commands={gripper_config.open_value:g}/{gripper_config.close_value:g} "
             f"confidence={gripper_config.residual_confidence_threshold:g} "
-            f"confirm_frames={gripper_config.residual_confirm_frames} "
+            f"act_confirm_frames={gripper_config.act_confirm_frames} "
+            f"residual_confirm_frames={gripper_config.residual_confirm_frames} "
             f"min_hold_s={gripper_config.min_hold_s:g}"
         )
         if config.inference.dry_run:

@@ -32,6 +32,8 @@ class GripperControlResult:
 class _SideState:
     initialized: bool = False
     base_closed: bool = False
+    pending_base_closed: bool = False
+    pending_base_count: int = 0
     final_closed: bool = False
     active_class: GripperResidualClass = GripperResidualClass.KEEP_BASE
     pending_class: GripperResidualClass = GripperResidualClass.KEEP_BASE
@@ -49,16 +51,30 @@ class BinaryGripperController:
         if not state.initialized:
             threshold = hysteresis.close_threshold if hysteresis.enabled else hysteresis.single_threshold
             state.base_closed = score >= threshold - _THRESHOLD_EPSILON
+            state.pending_base_closed = state.base_closed
             state.final_closed = state.base_closed
             state.initialized = True
             return
+
         if not hysteresis.enabled:
-            state.base_closed = score >= hysteresis.single_threshold - _THRESHOLD_EPSILON
+            requested_closed = score >= hysteresis.single_threshold - _THRESHOLD_EPSILON
         elif state.base_closed:
-            if score <= hysteresis.open_threshold + _THRESHOLD_EPSILON:
-                state.base_closed = False
-        elif score >= hysteresis.close_threshold - _THRESHOLD_EPSILON:
-            state.base_closed = True
+            requested_closed = score > hysteresis.open_threshold + _THRESHOLD_EPSILON
+        else:
+            requested_closed = score >= hysteresis.close_threshold - _THRESHOLD_EPSILON
+
+        if requested_closed == state.base_closed:
+            state.pending_base_closed = state.base_closed
+            state.pending_base_count = 0
+            return
+        if requested_closed != state.pending_base_closed:
+            state.pending_base_closed = requested_closed
+            state.pending_base_count = 1
+        else:
+            state.pending_base_count += 1
+        if state.pending_base_count >= self.config.act_confirm_frames:
+            state.base_closed = requested_closed
+            state.pending_base_count = 0
 
     def _confirmed_class(
         self,

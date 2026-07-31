@@ -44,14 +44,16 @@ inference:
   gripper:
     open_value: 0.0
     close_value: 0.8
+    # Require a stable ACT open/close request instead of switching on one noisy frame.
+    act_confirm_frames: 3
     residual_confidence_threshold: 0.70
     residual_confirm_frames: 3
     min_hold_s: 0.30
     hysteresis:
       enabled: true
-      open_threshold: 0.20
+      open_threshold: 0.50
       close_threshold: 0.40
-      single_threshold: 0.30
+      single_threshold: 0.45
 
   # Current mantis_camera_ros contract. Every inference step consumes a unique
   # frame from all three 30 FPS streams; the runner converts sources to RGB.

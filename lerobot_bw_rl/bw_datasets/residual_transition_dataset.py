@@ -114,9 +114,10 @@ class ResidualDatasetConfig:
     normalization_clip: float = 10.0
     use_only_interventions: bool = False
     gripper_hysteresis_enabled: bool = True
-    gripper_open_threshold: float = 0.20
+    gripper_open_threshold: float = 0.50
     gripper_close_threshold: float = 0.40
-    gripper_single_threshold: float = 0.30
+    gripper_single_threshold: float = 0.45
+    gripper_act_confirm_frames: int = 3
 
 
 def preflight_gripper_event_counts(cfg: ResidualDatasetConfig, minimum: int) -> np.ndarray:
@@ -151,6 +152,7 @@ def preflight_gripper_event_counts(cfg: ResidualDatasetConfig, minimum: int) -> 
         open_threshold=cfg.gripper_open_threshold,
         close_threshold=cfg.gripper_close_threshold,
         single_threshold=cfg.gripper_single_threshold,
+        act_confirm_frames=cfg.gripper_act_confirm_frames,
     )
     counts = count_gripper_events(classes, episode_indices)
     require_gripper_event_counts(counts, minimum)
@@ -165,29 +167,52 @@ def discretize_gripper_commands(
     open_threshold: float,
     close_threshold: float,
     single_threshold: float,
+    confirm_frames: int = 1,
 ) -> np.ndarray:
     """Convert continuous two-gripper commands into latched open/closed states."""
     values = np.asarray(commands, dtype=np.float32).reshape(-1, 2)
     episodes = np.asarray(episode_indices, dtype=np.int64).reshape(-1)
     if len(values) != len(episodes):
         raise ValueError("Gripper command and episode lengths do not match")
-    if not open_threshold < single_threshold < close_threshold:
-        raise ValueError("Gripper thresholds must satisfy open < single < close")
+    thresholds = np.asarray([open_threshold, single_threshold, close_threshold], dtype=np.float64)
+    if not np.all(np.isfinite(thresholds)) or not np.all((0.0 <= thresholds) & (thresholds <= 0.8)):
+        raise ValueError("Gripper thresholds must each be finite and within [0.0, 0.8]")
+    if confirm_frames < 1:
+        raise ValueError("Gripper confirm_frames must be at least 1")
     output = np.zeros_like(values, dtype=np.int64)
     state = np.zeros(2, dtype=np.bool_)
+    pending_state = np.zeros(2, dtype=np.bool_)
+    pending_count = np.zeros(2, dtype=np.int64)
     previous_episode: int | None = None
     for index, (command, episode) in enumerate(zip(values, episodes)):
         if previous_episode is None or int(episode) != previous_episode:
             threshold = close_threshold if hysteresis_enabled else single_threshold
             state = command >= threshold - GRIPPER_THRESHOLD_EPSILON
+            pending_state = state.copy()
+            pending_count.fill(0)
         elif hysteresis_enabled:
-            state = np.where(
+            requested_state = np.where(
                 state,
                 command > open_threshold + GRIPPER_THRESHOLD_EPSILON,
                 command >= close_threshold - GRIPPER_THRESHOLD_EPSILON,
             )
         else:
-            state = command >= single_threshold - GRIPPER_THRESHOLD_EPSILON
+            requested_state = command >= single_threshold - GRIPPER_THRESHOLD_EPSILON
+        if previous_episode is not None and int(episode) == previous_episode:
+            for side in range(2):
+                requested = bool(requested_state[side])
+                if requested == bool(state[side]):
+                    pending_state[side] = state[side]
+                    pending_count[side] = 0
+                else:
+                    if requested != bool(pending_state[side]):
+                        pending_state[side] = requested
+                        pending_count[side] = 1
+                    else:
+                        pending_count[side] += 1
+                    if pending_count[side] >= confirm_frames:
+                        state[side] = requested
+                        pending_count[side] = 0
         output[index] = state.astype(np.int64)
         previous_episode = int(episode)
     return output
@@ -204,6 +229,7 @@ def build_gripper_classes(
     open_threshold: float,
     close_threshold: float,
     single_threshold: float,
+    act_confirm_frames: int = 1,
 ) -> np.ndarray:
     base_gripper = discretize_gripper_commands(
         np.asarray(action_act)[:, GRIPPER_INDICES],
@@ -212,6 +238,7 @@ def build_gripper_classes(
         open_threshold=open_threshold,
         close_threshold=close_threshold,
         single_threshold=single_threshold,
+        confirm_frames=act_confirm_frames,
     )
     executed_gripper = discretize_gripper_commands(
         np.asarray(action_executed)[:, GRIPPER_INDICES],
@@ -220,6 +247,7 @@ def build_gripper_classes(
         open_threshold=open_threshold,
         close_threshold=close_threshold,
         single_threshold=single_threshold,
+        confirm_frames=1,
     )
     classes = np.zeros((len(base_gripper), 2), dtype=np.int64)
     valid_intervention = np.asarray(is_intervention, dtype=np.bool_) & np.asarray(
@@ -328,6 +356,7 @@ class _ResidualDataBase:
             open_threshold=cfg.gripper_open_threshold,
             close_threshold=cfg.gripper_close_threshold,
             single_threshold=cfg.gripper_single_threshold,
+            act_confirm_frames=cfg.gripper_act_confirm_frames,
         )
         self.observation_stats = cfg.observation_stats
         if self.observation_stats is not None and self.observation_stats.mean.size != self.obs_dim:

@@ -95,9 +95,10 @@ def parse_args() -> argparse.Namespace:
     hysteresis.add_argument("--gripper-hysteresis", dest="gripper_hysteresis", action="store_true")
     hysteresis.add_argument("--no-gripper-hysteresis", dest="gripper_hysteresis", action="store_false")
     parser.set_defaults(gripper_hysteresis=True)
-    parser.add_argument("--gripper-open-threshold", type=float, default=0.20)
+    parser.add_argument("--gripper-open-threshold", type=float, default=0.50)
     parser.add_argument("--gripper-close-threshold", type=float, default=0.40)
-    parser.add_argument("--gripper-single-threshold", type=float, default=0.30)
+    parser.add_argument("--gripper-single-threshold", type=float, default=0.45)
+    parser.add_argument("--gripper-act-confirm-frames", type=int, default=3)
     parser.add_argument("--normalization-clip", type=float, default=10.0)
     parser.add_argument("--visual-feature-mode", choices=["cache", "online"], default="cache")
     parser.add_argument("--visual-cache-dir", type=Path, default=None)
@@ -132,12 +133,12 @@ def validate_gripper_args(args: argparse.Namespace) -> None:
     )
     if not all(math.isfinite(value) for value in thresholds):
         raise ValueError("Gripper thresholds must be finite")
-    if not 0.0 <= thresholds[0] < thresholds[1] < thresholds[2] <= 0.8:
-        raise ValueError(
-            "Gripper thresholds must satisfy 0.0 <= open < single < close <= 0.8"
-        )
+    if not all(0.0 <= value <= 0.8 for value in thresholds):
+        raise ValueError("Gripper thresholds must each be within [0.0, 0.8]")
     if args.gripper_min_events < 20:
         raise ValueError("--gripper-min-events cannot be lower than the required minimum of 20")
+    if args.gripper_act_confirm_frames < 1:
+        raise ValueError("--gripper-act-confirm-frames must be at least 1")
 
 
 def split_episode_indices(dataset: ResidualBCDataset, *, validation_ratio: float, seed: int) -> tuple[list[int], list[int]]:
@@ -253,6 +254,7 @@ def main() -> int:
         gripper_open_threshold=args.gripper_open_threshold,
         gripper_close_threshold=args.gripper_close_threshold,
         gripper_single_threshold=args.gripper_single_threshold,
+        gripper_act_confirm_frames=args.gripper_act_confirm_frames,
     )
     event_counts = preflight_gripper_event_counts(dataset_config, args.gripper_min_events)
     print(
@@ -327,6 +329,7 @@ def main() -> int:
         "gripper_control": {
             "open_value": 0.0,
             "close_value": 0.8,
+            "act_confirm_frames": int(args.gripper_act_confirm_frames),
             "residual_confidence_threshold": 0.70,
             "residual_confirm_frames": 3,
             "min_hold_s": 0.30,

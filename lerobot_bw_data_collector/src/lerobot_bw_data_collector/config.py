@@ -24,6 +24,7 @@ class RobotTopics:
     action_act: str | None = None
     action_rl_delta: str | None = None
     action_final: str | None = None
+    gripper_residual_class: str | None = None
 
 
 @dataclass(slots=True)
@@ -149,9 +150,10 @@ def load_config(
         action_act=_expand_robot_sn(raw_topics.get("action_act"), final_robot_sn),
         action_rl_delta=_expand_robot_sn(raw_topics.get("action_rl_delta"), final_robot_sn),
         action_final=_expand_robot_sn(raw_topics.get("action_final"), final_robot_sn),
+        gripper_residual_class=_expand_robot_sn(raw_topics.get("gripper_residual_class"), final_robot_sn),
     )
     if final_mode == "rl":
-        for key in ["control_source", "action_act", "action_rl_delta", "action_final"]:
+        for key in ["control_source", "action_act", "action_rl_delta", "action_final", "gripper_residual_class"]:
             if getattr(robot_topics, key) in {None, ""}:
                 raise ValueError(f"RL mode requires robot.topics.{key}")
 

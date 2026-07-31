@@ -10,7 +10,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image, JointState
-from std_msgs.msg import Int32
+from std_msgs.msg import Int32, Int8MultiArray
 
 from .camera_stream import CameraStreamStatus, CameraStreamTracker
 from .config import AppConfig
@@ -74,6 +74,9 @@ class BWObservationReader(Node):
         self.debug_delta_publisher = self.create_publisher(JointState, config.robot.output_topics.debug_action_rl_delta, 10)
         self.debug_composed_publisher = self.create_publisher(JointState, config.robot.output_topics.debug_action_composed, 10)
         self.debug_final_publisher = self.create_publisher(JointState, config.robot.output_topics.debug_action_final, 10)
+        self.debug_gripper_class_publisher = self.create_publisher(
+            Int8MultiArray, config.robot.output_topics.debug_gripper_residual_class, 10
+        )
 
         self.get_logger().info(f"Subscribed state: {config.robot.input_topics.state}")
         if config.robot.input_topics.control_source:
@@ -86,6 +89,9 @@ class BWObservationReader(Node):
         self.get_logger().info(f"Debug action_delta:    {config.robot.output_topics.debug_action_rl_delta}")
         self.get_logger().info(f"Debug action_composed: {config.robot.output_topics.debug_action_composed}")
         self.get_logger().info(f"Debug action_final:    {config.robot.output_topics.debug_action_final}")
+        self.get_logger().info(
+            f"Debug gripper class:   {config.robot.output_topics.debug_gripper_residual_class}"
+        )
 
     def _on_state(self, msg: JointState) -> None:
         with self._lock:
@@ -301,6 +307,7 @@ class BWObservationReader(Node):
         delta_msg: JointState,
         composed_msg: JointState,
         final_msg: JointState,
+        gripper_classes: np.ndarray,
         *,
         dry_run: bool = False,
     ) -> None:
@@ -311,6 +318,9 @@ class BWObservationReader(Node):
         self.debug_delta_publisher.publish(delta_msg)
         self.debug_composed_publisher.publish(composed_msg)
         self.debug_final_publisher.publish(final_msg)
+        class_msg = Int8MultiArray()
+        class_msg.data = [int(value) for value in np.asarray(gripper_classes).reshape(2)]
+        self.debug_gripper_class_publisher.publish(class_msg)
 
     @property
     def last_error(self) -> str | None:

@@ -41,6 +41,7 @@ def _print_topic_existence(reader: BWTopicReader) -> bool:
                 reader.config.robot.topics.action_act: "sensor_msgs/msg/JointState",
                 reader.config.robot.topics.action_rl_delta: "sensor_msgs/msg/JointState",
                 reader.config.robot.topics.action_final: "sensor_msgs/msg/JointState",
+                reader.config.robot.topics.gripper_residual_class: "std_msgs/msg/Int8MultiArray",
             }
         )
     ok = True
@@ -134,6 +135,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  [OK] action.act       shape={sample.action_act.shape}")
             print(f"  [OK] action.rl_delta  shape={sample.action_rl_delta.shape}")
             print(f"  [OK] action.executed  shape={sample.action_executed.shape}")
+            print(f"  [OK] gripper class    value={sample.gripper_policy_class.tolist()}")
         if not topic_graph_ok:
             print("\nWarning: message content worked, but ROS graph type check had warnings above.")
         print("\nTopic check passed. You can run scripts/collect.sh now.")

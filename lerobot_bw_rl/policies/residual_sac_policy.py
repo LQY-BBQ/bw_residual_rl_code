@@ -1,6 +1,6 @@
-"""Minimal residual SAC actor/critic networks.
+"""Minimal arm-only residual SAC actor/critic networks.
 
-The actor output is normalized residual action in [-1, 1]^16.
+The actor output is normalized arm residual action in [-1, 1]^14.
 Deployment converts it to joint-position delta with residual_limits.
 """
 from __future__ import annotations

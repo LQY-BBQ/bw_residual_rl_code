@@ -76,6 +76,7 @@ RL_COLUMNS = [
     "action.rl_delta",
     "action.human",
     "action.executed",
+    "action.gripper_policy_class",
     "reward",
     "done",
     "success",
@@ -1078,6 +1079,14 @@ def generate_rl_visuals(root: Path, df_ep: pd.DataFrame, info: dict[str, Any], e
     if missing:
         add_warning(warnings, "ERROR", "missing_rl_columns", f"Missing RL columns: {missing}", columns=",".join(missing))
         raise ValueError(f"Missing RL columns: {missing}")
+    class_feature = (info.get("features") or {}).get("action.gripper_policy_class", {})
+    if class_feature.get("dtype") != "int64" or list(class_feature.get("shape", [])) != [2]:
+        add_warning(
+            warnings,
+            "ERROR",
+            "gripper_class_schema",
+            "action.gripper_policy_class metadata must declare dtype=int64 and shape=[2].",
+        )
 
     state = stack_vector_column(df_ep, OBS_STATE)
     executed = stack_vector_column(df_ep, "action.executed", dim=state.shape[1])
@@ -1085,6 +1094,7 @@ def generate_rl_visuals(root: Path, df_ep: pd.DataFrame, info: dict[str, Any], e
     act = stack_vector_column(df_ep, "action.act", dim=state.shape[1])
     delta = stack_vector_column(df_ep, "action.rl_delta", dim=state.shape[1])
     human = stack_vector_column(df_ep, "action.human", dim=state.shape[1])
+    gripper_policy_class = stack_vector_column(df_ep, "action.gripper_policy_class", dim=2)
     t = get_time_vector(df_ep, len(df_ep))
     duration, fps_est = estimate_duration_fps(t, len(df_ep), info)
     joint_names = get_joint_names(info, state.shape[1])
@@ -1093,6 +1103,81 @@ def generate_rl_visuals(root: Path, df_ep: pd.DataFrame, info: dict[str, Any], e
 
     check_common_quality(df_ep, t, executed, state, info, args, warnings)
     check_video_quality(root, len(df_ep), warnings)
+
+    vector_dimensions = {
+        OBS_STATE: state.shape[1],
+        ACTION: action.shape[1],
+        "action.act": act.shape[1],
+        "action.rl_delta": delta.shape[1],
+        "action.human": human.shape[1],
+        "action.executed": executed.shape[1],
+    }
+    invalid_dimensions = {key: value for key, value in vector_dimensions.items() if value != 16}
+    if invalid_dimensions:
+        add_warning(
+            warnings,
+            "ERROR",
+            "hybrid_action_dimension",
+            f"All state/action vectors must remain 16-D, got {invalid_dimensions}.",
+        )
+
+    finite_classes = gripper_policy_class[np.isfinite(gripper_policy_class)]
+    if not np.all(np.isin(finite_classes.astype(np.int64), [0, 1, 2])) or not np.allclose(
+        finite_classes, finite_classes.astype(np.int64), rtol=0.0, atol=0.0
+    ):
+        add_warning(
+            warnings,
+            "ERROR",
+            "invalid_gripper_policy_class",
+            "action.gripper_policy_class must contain only {0,1,2}.",
+        )
+    if not np.isfinite(gripper_policy_class).all():
+        add_warning(
+            warnings,
+            "ERROR",
+            "nonfinite_gripper_policy_class",
+            "action.gripper_policy_class contains NaN or Inf.",
+        )
+
+    gripper_indices = [joint_names.index(name) for name in GRIPPERS]
+    max_gripper_delta = float(np.nanmax(np.abs(delta[:, gripper_indices])))
+    if max_gripper_delta > 1e-7:
+        add_warning(
+            warnings,
+            "ERROR",
+            "nonzero_gripper_rl_delta",
+            f"action.rl_delta gripper entries must be zero; max abs value={max_gripper_delta:.9g}.",
+            max_abs=max_gripper_delta,
+        )
+    endpoint_valid = lambda values: np.isclose(values, 0.0, rtol=0.0, atol=1e-6) | np.isclose(  # noqa: E731
+        values, 0.8, rtol=0.0, atol=1e-6
+    )
+    legacy_upgrade = (root / "gripper_schema_upgrade.json").is_file()
+    for key, values in ((ACTION, action), ("action.executed", executed)):
+        invalid_endpoint_count = int(np.size(values[:, gripper_indices]) - endpoint_valid(values[:, gripper_indices]).sum())
+        if invalid_endpoint_count:
+            add_warning(
+                warnings,
+                "INFO" if legacy_upgrade else "ERROR",
+                "legacy_continuous_gripper" if legacy_upgrade else "nonbinary_executed_gripper",
+                f"{key} has {invalid_endpoint_count} gripper value(s) outside exact endpoints 0.0/0.8."
+                + (" This dataset was schema-upgraded without rewriting legacy actions." if legacy_upgrade else ""),
+                count=invalid_endpoint_count,
+            )
+
+    gripper_frame_counts = np.zeros((2, 3), dtype=np.int64)
+    gripper_event_counts = np.zeros((2, 3), dtype=np.int64)
+    classes_int = np.where(np.isfinite(gripper_policy_class), gripper_policy_class, 0).astype(np.int64)
+    previous = np.zeros(2, dtype=np.int64)
+    for frame_index, classes in enumerate(classes_int):
+        for side in range(2):
+            value = int(classes[side])
+            if value not in {0, 1, 2}:
+                continue
+            gripper_frame_counts[side, value] += 1
+            if value != 0 and (frame_index == 0 or value != int(previous[side])):
+                gripper_event_counts[side, value] += 1
+        previous = classes
 
     control = scalar_column(df_ep, "control_source", default=-1)
     intervention = scalar_column(df_ep, "is_intervention", default=0)
@@ -1118,13 +1203,14 @@ def generate_rl_visuals(root: Path, df_ep: pd.DataFrame, info: dict[str, Any], e
 
     # Units: in the bw_residual package, action.rl_delta is recorded from Policy/debug/action_rl_delta,
     # which is the joint-space delta after applying residual_limits, not a normalized [-1, 1] vector.
+    arm_indices = [index for index in range(state.shape[1]) if index not in gripper_indices]
     predicted_non_intervention = act + residual_lambda * delta
-    residual_target = human - act
+    residual_target = human[:, arm_indices] - act[:, arm_indices]
     non_intervention_mask = intervention < 0.5
     intervention_mask = intervention >= 0.5
     formula_err = np.abs(executed - predicted_non_intervention)
     human_err = np.abs(executed - human)
-    formula_err_norm = np.nanmax(formula_err, axis=1)
+    formula_err_norm = np.nanmax(formula_err[:, arm_indices], axis=1)
     human_err_norm = np.nanmax(human_err, axis=1)
 
     # `action` should be the final executed action in both BC and RL modes.
@@ -1147,7 +1233,7 @@ def generate_rl_visuals(root: Path, df_ep: pd.DataFrame, info: dict[str, Any], e
                 warnings,
                 severity,
                 "non_intervention_formula_mismatch",
-                "For non-intervention frames, action.executed differs from action.act + lambda*action.rl_delta. This can be expected when policy-runner smoothing/clamp is enabled, because debug action_final is saved after smoothing.",
+                "For non-intervention frames, arm entries in action.executed differ from action.act + lambda*action.rl_delta. This can be expected when policy-runner arm smoothing/clamp is enabled.",
                 max_error=max_formula_err,
                 mean_error=mean_formula_err,
                 residual_lambda=residual_lambda,
@@ -1162,7 +1248,7 @@ def generate_rl_visuals(root: Path, df_ep: pd.DataFrame, info: dict[str, Any], e
             add_warning(warnings, "WARN", "timing_dt_large", f"{col} has abs(dt) larger than {args.max_timing_dt}s.", column=col, max_abs_dt=float(np.nanmax(np.abs(vals))))
 
     limits = residual_limits(args.residual_limit_default, args.residual_limit_gripper, state.shape[1], joint_names)
-    delta_saturation = np.abs(delta) / np.maximum(limits.reshape(1, -1), 1e-9)
+    delta_saturation = np.abs(delta[:, arm_indices]) / np.maximum(limits[arm_indices].reshape(1, -1), 1e-9)
     saturated_ratio = float(np.mean(delta_saturation > 0.95))
     if saturated_ratio > 0.1:
         add_warning(warnings, "WARN", "residual_near_limit", f"{saturated_ratio*100:.1f}% of residual delta entries are above 95% of configured residual limit.", ratio=saturated_ratio)
@@ -1236,9 +1322,19 @@ def generate_rl_visuals(root: Path, df_ep: pd.DataFrame, info: dict[str, Any], e
         "usable_transitions": int(np.sum((np.arange(len(df_ep)) < len(df_ep)-1) & (done < 0.5))),
         "max_formula_error_non_intervention": float(np.nanmax(formula_err_norm[non_intervention_mask])) if np.any(non_intervention_mask) else float("nan"),
         "max_human_error_intervention": float(np.nanmax(human_err_norm[intervention_mask])) if np.any(intervention_mask) else float("nan"),
-        "residual_delta_mean_l2": float(np.nanmean(np.linalg.norm(delta, axis=1))),
+        "residual_delta_mean_l2": float(np.nanmean(np.linalg.norm(delta[:, arm_indices], axis=1))),
         "residual_target_mean_l2": float(np.nanmean(np.linalg.norm(residual_target, axis=1))),
         "residual_saturated_ratio": saturated_ratio,
+        "left_keep_base_frames": int(gripper_frame_counts[0, 0]),
+        "left_force_open_frames": int(gripper_frame_counts[0, 1]),
+        "left_force_close_frames": int(gripper_frame_counts[0, 2]),
+        "right_keep_base_frames": int(gripper_frame_counts[1, 0]),
+        "right_force_open_frames": int(gripper_frame_counts[1, 1]),
+        "right_force_close_frames": int(gripper_frame_counts[1, 2]),
+        "left_force_open_events": int(gripper_event_counts[0, 1]),
+        "left_force_close_events": int(gripper_event_counts[0, 2]),
+        "right_force_open_events": int(gripper_event_counts[1, 1]),
+        "right_force_close_events": int(gripper_event_counts[1, 2]),
     }
     pd.DataFrame([rl_stats]).to_csv(out_dir / "rl_episode_stats.csv", index=False)
 
@@ -1253,10 +1349,14 @@ def generate_rl_visuals(root: Path, df_ep: pd.DataFrame, info: dict[str, Any], e
         f"Intervention frames: {rl_stats['intervention_frames']} ({rl_stats['intervention_ratio']*100:.2f}%)",
         f"Reward sum in parquet: {rl_stats['reward_sum_parquet']:.6g}",
         f"Usable transitions: {rl_stats['usable_transitions']}",
+        "Gripper policy events (left open/close, right open/close): "
+        f"{gripper_event_counts[0, 1]}/{gripper_event_counts[0, 2]}, "
+        f"{gripper_event_counts[1, 1]}/{gripper_event_counts[1, 2]}",
         "",
         "Important interpretation notes:",
-        " - action.rl_delta in this package is saved as joint-space delta from Policy/debug/action_rl_delta.",
-        " - action.executed is saved as the final published action. If policy-runner smoothing/clamp is enabled, action.executed may differ from action.act + lambda*action.rl_delta.",
+        " - action.rl_delta is 16-D for storage, but gripper indices 7/15 must be zero; only 14 arm entries carry residuals.",
+        " - action.executed grippers use categorical control and exact 0.0/0.8 endpoints, so arm reconstruction excludes grippers.",
+        " - If arm smoothing/clamp is enabled, executed arms may differ from action.act + lambda*action.rl_delta.",
         " - During intervention, action.executed should equal action.human.",
         f"Reward events: {rl_stats['reward_event_count']} total event frame(s), {rl_stats['reward_nonzero_frames']} nonzero reward frame(s)",
         f"Last frame: reward={rl_stats['last_reward']:.6g}, done={rl_stats['last_done']:.6g}, success={rl_stats['last_success']:.6g}, event={rl_stats['terminal_event_type']}",

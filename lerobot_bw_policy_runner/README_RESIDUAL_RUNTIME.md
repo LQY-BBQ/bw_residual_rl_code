@@ -24,6 +24,7 @@ act_residual_rl
 /{robot_sn}/Policy/debug/action_rl_delta
 /{robot_sn}/Policy/debug/action_composed
 /{robot_sn}/Policy/debug/action_final
+/{robot_sn}/Policy/debug/gripper_residual_class
 ```
 
 ## 摄像头分辨率适配
@@ -94,17 +95,24 @@ ACT三路投影视觉特征
        -> ACT Transformer -> action_ACT
        -> pooled visual feature -> residual BC/RL
 
-final = action_ACT + lambda × residual_limits × residual_norm
+手臂 = action_ACT + lambda × residual_limits × residual_norm（14 维）
+夹爪 = ACT 二值基础状态 + Residual BC 三分类覆盖（左右各 3 类）
 ```
 
 四个调试话题的含义：
 
 ```text
 action_act       = ACT 输出
-action_rl_delta  = residual_limits × residual_norm
-action_composed  = action_act + lambda × action_rl_delta
-action_final     = action_composed 经过 clamp 和 smoothing 后的最终下发命令
+action_rl_delta  = 16 维，其中夹爪索引 7/15 固定为 0
+action_composed  = 14 维手臂合成结果 + 夹爪候选二值状态
+action_final     = 手臂经过 clamp/smoothing，夹爪经过确认/保持后的最终命令
+gripper_residual_class = 左右夹爪原始分类，0=KEEP_BASE、1=FORCE_OPEN、2=FORCE_CLOSE
 ```
+
+夹爪最终只发布 `0.0`（OPEN）或 `0.8`（CLOSE）。默认开启 ACT 双阈值迟滞：OPEN 达到
+`0.40` 才关闭，CLOSE 降到 `0.20` 才打开；`--no-gripper-hysteresis` 可切为单阈值
+`0.30`。命令行显式值优先于 YAML。无论是否启用双阈值，Residual 都需要连续 3 帧同类且
+置信度至少 `0.70`，最终状态切换后保持至少 `0.30s`。
 
 ## 3. 只运行 ACT
 
@@ -156,6 +164,8 @@ ACT fingerprint
 只有显式传入 `--residual-lambda` 时，才覆盖 checkpoint 中的 lambda。Residual limits 始终使用 checkpoint 中保存的训练值，防止训练和部署不一致。
 
 ## 6. 安全检查
+
+部署只接受 format v4 hybrid checkpoint；旧的连续夹爪 residual checkpoint 不会自动转换。
 
 Residual 模式启动时会检查：
 

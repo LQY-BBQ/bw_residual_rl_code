@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,7 @@ class OutputTopics:
     debug_action_rl_delta: str
     debug_action_composed: str
     debug_action_final: str
+    debug_gripper_residual_class: str
 
 
 @dataclass(slots=True)
@@ -72,6 +74,24 @@ class ActionClampConfig:
 
 
 @dataclass(slots=True)
+class GripperHysteresisConfig:
+    enabled: bool = True
+    open_threshold: float = 0.20
+    close_threshold: float = 0.40
+    single_threshold: float = 0.30
+
+
+@dataclass(slots=True)
+class GripperControlConfig:
+    open_value: float = 0.0
+    close_value: float = 0.8
+    residual_confidence_threshold: float = 0.70
+    residual_confirm_frames: int = 3
+    min_hold_s: float = 0.30
+    hysteresis: GripperHysteresisConfig = field(default_factory=GripperHysteresisConfig)
+
+
+@dataclass(slots=True)
 class ResidualConfig:
     policy_path: Path | None = None
     lambda_: float | None = None
@@ -100,6 +120,7 @@ class InferenceConfig:
     residual: ResidualConfig | None = None
     log_dir: Path | None = None
     camera_stream: CameraStreamConfig | None = None
+    gripper: GripperControlConfig = field(default_factory=GripperControlConfig)
 
 
 @dataclass(slots=True)
@@ -171,13 +192,15 @@ def _residual_limits(raw: Any) -> list[float]:
     raise ValueError("residual.limits must be scalar, list, dict, or null")
 
 
-def load_config(config_path: str | Path, *, robot_sn: str | None = None, policy_path: str | Path | None = None, residual_policy_path: str | Path | None = None, mode: str | None = None, residual_lambda: float | None = None, device: str | None = None, fps: float | None = None, dry_run: bool | None = None, task: str | None = None, log_dir: str | Path | None = None) -> AppConfig:
+def load_config(config_path: str | Path, *, robot_sn: str | None = None, policy_path: str | Path | None = None, residual_policy_path: str | Path | None = None, mode: str | None = None, residual_lambda: float | None = None, device: str | None = None, fps: float | None = None, dry_run: bool | None = None, task: str | None = None, log_dir: str | Path | None = None, gripper_hysteresis: bool | None = None) -> AppConfig:
     raw = _read_yaml(Path(config_path))
     raw_ros = raw.get("ros", {}) or {}
     raw_robot = raw.get("robot", {}) or {}
     raw_inference = raw.get("inference", {}) or {}
     raw_residual = raw_inference.get("residual", {}) or {}
     raw_camera_stream = raw_inference.get("camera_stream", {}) or {}
+    raw_gripper = raw_inference.get("gripper", {}) or {}
+    raw_gripper_hysteresis = raw_gripper.get("hysteresis", {}) or {}
 
     final_robot_sn = str(robot_sn or raw_robot.get("robot_sn") or "").strip()
     if not final_robot_sn or final_robot_sn == "BW_XXXXXXX":
@@ -262,6 +285,54 @@ def load_config(config_path: str | Path, *, robot_sn: str | None = None, policy_
     if gripper_name_style not in {"joint", "short"}:
         raise ValueError("inference.gripper_name_style must be 'joint' or 'short'")
 
+    hysteresis_config = GripperHysteresisConfig(
+        enabled=(
+            bool(gripper_hysteresis)
+            if gripper_hysteresis is not None
+            else _as_bool(raw_gripper_hysteresis.get("enabled", True))
+        ),
+        open_threshold=float(raw_gripper_hysteresis.get("open_threshold", 0.20)),
+        close_threshold=float(raw_gripper_hysteresis.get("close_threshold", 0.40)),
+        single_threshold=float(raw_gripper_hysteresis.get("single_threshold", 0.30)),
+    )
+    gripper_config = GripperControlConfig(
+        open_value=float(raw_gripper.get("open_value", 0.0)),
+        close_value=float(raw_gripper.get("close_value", 0.8)),
+        residual_confidence_threshold=float(raw_gripper.get("residual_confidence_threshold", 0.70)),
+        residual_confirm_frames=int(raw_gripper.get("residual_confirm_frames", 3)),
+        min_hold_s=float(raw_gripper.get("min_hold_s", 0.30)),
+        hysteresis=hysteresis_config,
+    )
+    numeric_gripper_values = (
+        gripper_config.open_value,
+        gripper_config.close_value,
+        gripper_config.residual_confidence_threshold,
+        gripper_config.min_hold_s,
+        hysteresis_config.open_threshold,
+        hysteresis_config.single_threshold,
+        hysteresis_config.close_threshold,
+    )
+    if not all(math.isfinite(value) for value in numeric_gripper_values):
+        raise ValueError("inference.gripper values and thresholds must be finite")
+    if gripper_config.open_value != 0.0 or gripper_config.close_value != 0.8:
+        raise ValueError("inference.gripper command endpoints are fixed at open_value=0.0 and close_value=0.8")
+    if not hysteresis_config.open_threshold < hysteresis_config.single_threshold < hysteresis_config.close_threshold:
+        raise ValueError(
+            "gripper thresholds must satisfy open_threshold < single_threshold < close_threshold"
+        )
+    if not (
+        gripper_config.open_value
+        <= hysteresis_config.open_threshold
+        < hysteresis_config.close_threshold
+        <= gripper_config.close_value
+    ):
+        raise ValueError("inference.gripper hysteresis thresholds must be within [open_value, close_value]")
+    if not 0.0 <= gripper_config.residual_confidence_threshold <= 1.0:
+        raise ValueError("inference.gripper.residual_confidence_threshold must be in [0, 1]")
+    if gripper_config.residual_confirm_frames < 1:
+        raise ValueError("inference.gripper.residual_confirm_frames must be at least 1")
+    if gripper_config.min_hold_s < 0:
+        raise ValueError("inference.gripper.min_hold_s must be non-negative")
     residual_cfg = ResidualConfig(
         policy_path=final_residual_path,
         lambda_=(
@@ -288,6 +359,13 @@ def load_config(config_path: str | Path, *, robot_sn: str | None = None, policy_
                 debug_action_rl_delta=_expand_robot_sn(raw_output_topics.get("debug_action_rl_delta", f"/{final_robot_sn}/Policy/debug/action_rl_delta"), final_robot_sn),
                 debug_action_composed=_expand_robot_sn(raw_output_topics.get("debug_action_composed", f"/{final_robot_sn}/Policy/debug/action_composed"), final_robot_sn),
                 debug_action_final=_expand_robot_sn(raw_output_topics.get("debug_action_final", f"/{final_robot_sn}/Policy/debug/action_final"), final_robot_sn),
+                debug_gripper_residual_class=_expand_robot_sn(
+                    raw_output_topics.get(
+                        "debug_gripper_residual_class",
+                        f"/{final_robot_sn}/Policy/debug/gripper_residual_class",
+                    ),
+                    final_robot_sn,
+                ),
             ),
         ),
         inference=InferenceConfig(
@@ -317,6 +395,7 @@ def load_config(config_path: str | Path, *, robot_sn: str | None = None, policy_
                 max_frame_age_s=max_frame_age_s,
                 require_new_frames=_as_bool(raw_camera_stream.get("require_new_frames", True)),
             ),
+            gripper=gripper_config,
         ),
     )
 

@@ -11,7 +11,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image, JointState
-from std_msgs.msg import Int32
+from std_msgs.msg import Int32, Int8MultiArray
 
 from .camera_stream import CameraStreamStatus, CameraStreamTracker
 from .config import AppConfig
@@ -31,6 +31,7 @@ class CollectorSample:
     action_rl_delta: Any | None = None
     action_human: Any | None = None
     action_executed: Any | None = None
+    gripper_policy_class: Any | None = None
     timing: dict[str, float] | None = None
 
 
@@ -52,6 +53,7 @@ class BWTopicReader(Node):
         self._latest_action_act: JointState | None = None
         self._latest_action_rl_delta: JointState | None = None
         self._latest_action_final: JointState | None = None
+        self._latest_gripper_residual_class: Int8MultiArray | None = None
         self._latest_images: dict[str, Image] = {}
         self._camera_tracker = CameraStreamTracker(list(config.cameras.topics))
         self._consumed_image_sequences = {name: 0 for name in config.cameras.topics}
@@ -69,6 +71,12 @@ class BWTopicReader(Node):
             self.create_subscription(JointState, config.robot.topics.action_act, self._on_action_act, joint_qos)
             self.create_subscription(JointState, config.robot.topics.action_rl_delta, self._on_action_rl_delta, joint_qos)
             self.create_subscription(JointState, config.robot.topics.action_final, self._on_action_final, joint_qos)
+            self.create_subscription(
+                Int8MultiArray,
+                config.robot.topics.gripper_residual_class,
+                self._on_gripper_residual_class,
+                joint_qos,
+            )
 
         for camera_name, topic in config.cameras.topics.items():
             self.create_subscription(Image, topic, self._make_image_callback(camera_name), image_qos)
@@ -81,6 +89,7 @@ class BWTopicReader(Node):
             self.get_logger().info(f"Subscribed action_act:  {config.robot.topics.action_act}")
             self.get_logger().info(f"Subscribed rl_delta:    {config.robot.topics.action_rl_delta}")
             self.get_logger().info(f"Subscribed action_final:{config.robot.topics.action_final}")
+            self.get_logger().info(f"Subscribed grip class:  {config.robot.topics.gripper_residual_class}")
         for camera_name, topic in config.cameras.topics.items():
             self.get_logger().info(f"Subscribed camera {camera_name}: {topic}")
 
@@ -98,6 +107,8 @@ class BWTopicReader(Node):
         with self._lock: self._latest_action_rl_delta = msg
     def _on_action_final(self, msg: JointState) -> None:
         with self._lock: self._latest_action_final = msg
+    def _on_gripper_residual_class(self, msg: Int8MultiArray) -> None:
+        with self._lock: self._latest_gripper_residual_class = msg
 
     def _make_image_callback(self, camera_name: str):
         def _callback(msg: Image) -> None:
@@ -124,6 +135,9 @@ class BWTopicReader(Node):
                 if self._latest_action_act is None: missing.append(self.config.robot.topics.action_act or "<action_act>")
                 if self._latest_action_rl_delta is None: missing.append(self.config.robot.topics.action_rl_delta or "<action_rl_delta>")
                 if self._latest_action_final is None: missing.append(self.config.robot.topics.action_final or "<action_final>")
+                if self._latest_gripper_residual_class is None: missing.append(
+                    self.config.robot.topics.gripper_residual_class or "<gripper_residual_class>"
+                )
             return missing
 
     def wait_for_first_messages(self, timeout_s: float) -> bool:
@@ -224,6 +238,7 @@ class BWTopicReader(Node):
             act_msg = self._latest_action_act
             delta_msg = self._latest_action_rl_delta
             final_msg = self._latest_action_final
+            gripper_class_msg = self._latest_gripper_residual_class
             image_msgs = dict(self._latest_images)
             image_sequences = self._camera_tracker.sequences()
             image_received_times = self._camera_tracker.received_times()
@@ -255,7 +270,13 @@ class BWTopicReader(Node):
             self._last_wait_reason = f"stale camera image(s): {detail}"
             return None
         if self.config.dataset.mode == "rl" and self.config.record.require_rl_debug_topics:
-            if control_msg is None or act_msg is None or delta_msg is None or final_msg is None:
+            if (
+                control_msg is None
+                or act_msg is None
+                or delta_msg is None
+                or final_msg is None
+                or gripper_class_msg is None
+            ):
                 return None
 
         try:
@@ -290,6 +311,19 @@ class BWTopicReader(Node):
             act_vec = vector_from_joint_state(act_msg, source_label="Policy/debug/action_act") if act_msg is not None else np.zeros_like(human_vec)
             delta_vec = vector_from_joint_state(delta_msg, source_label="Policy/debug/action_rl_delta") if delta_msg is not None else np.zeros_like(human_vec)
             final_vec = vector_from_joint_state(final_msg, source_label="Policy/debug/action_final") if final_msg is not None else np.zeros_like(human_vec)
+            gripper_policy_class = np.asarray(
+                getattr(gripper_class_msg, "data", [0, 0]), dtype=np.int64
+            ).reshape(-1)
+            if gripper_policy_class.size != 2:
+                raise ValueError(
+                    "Policy/debug/gripper_residual_class must contain 2 values, "
+                    f"got {gripper_policy_class.size}"
+                )
+            if not np.all(np.isin(gripper_policy_class, [0, 1, 2])):
+                raise ValueError(
+                    "Policy/debug/gripper_residual_class contains a value outside {0,1,2}: "
+                    f"{gripper_policy_class.tolist()}"
+                )
             action_human = human_vec if is_intervention else np.zeros_like(human_vec)
             action_executed = human_vec if is_intervention else final_vec
             timing = {}
@@ -317,6 +351,7 @@ class BWTopicReader(Node):
             action_rl_delta=delta_vec,
             action_human=action_human,
             action_executed=action_executed,
+            gripper_policy_class=gripper_policy_class,
             timing=timing,
         )
 

@@ -17,6 +17,7 @@ robot:
     action_act: /{robot_sn}/Policy/debug/action_act
     action_rl_delta: /{robot_sn}/Policy/debug/action_rl_delta
     action_final: /{robot_sn}/Policy/debug/action_final
+    gripper_residual_class: /{robot_sn}/Policy/debug/gripper_residual_class
 
 cameras:
   # Current mantis_camera_ros contract. All three sources publish at 30 FPS;

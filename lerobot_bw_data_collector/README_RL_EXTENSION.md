@@ -91,6 +91,7 @@ RL 采集需要先启动 `lerobot_bw_policy_runner`，因为采集器要读取�
 /{robot_sn}/Policy/debug/action_act
 /{robot_sn}/Policy/debug/action_rl_delta
 /{robot_sn}/Policy/debug/action_final
+/{robot_sn}/Policy/debug/gripper_residual_class
 ```
 
 推荐流程：
@@ -126,6 +127,7 @@ action.act
 action.rl_delta
 action.human
 action.executed
+action.gripper_policy_class
 reward
 done
 success
@@ -143,10 +145,11 @@ RL 字段来源和处理：
 | `is_intervention` | 由采集器计算 | `control_source == 0` 时为 1 |
 | `has_human_action` | 由采集器计算 | 当前等于 `is_intervention` |
 | `action.act` | `/Policy/debug/action_act` | ACT 基础策略动作，16 维关节位置空间 |
-| `action.rl_delta` | `/Policy/debug/action_rl_delta` | joint-space residual delta，已经乘过 `residual_limits`，不是归一化 `[-1, 1]` |
+| `action.rl_delta` | `/Policy/debug/action_rl_delta` | 仍为 16 维；14 个手臂位置保存 joint-space residual，夹爪索引 7/15 固定为 0 |
 | `action.human` | Teleop 手臂 + 夹爪动作 | 接管帧保存人工动作；非接管帧保存 0 向量 |
 | `action.executed` | 由采集器根据控制源选择 | 接管帧等于 `action.human`；非接管帧等于 `/Policy/debug/action_final` |
 | `action` | 由采集器写入 | RL 模式下等于 `action.executed`，表示本帧实际执行动作 |
+| `action.gripper_policy_class` | `/Policy/debug/gripper_residual_class` | `(2,) int64`，左右原始策略类别：`0=KEEP_BASE, 1=FORCE_OPEN, 2=FORCE_CLOSE` |
 | `reward` | 键盘标注 | 默认 0，按键时写入当前帧 |
 | `done` | 键盘标注/停止逻辑 | episode 终止帧为 1；Ctrl+C 或 max frames 结束时最后一帧会标成失败终止 |
 | `success` | 键盘标注 | 成功终止帧为 1，失败终止帧为 0 |
@@ -200,13 +203,13 @@ JointState.name + JointState.position
 
 RL 采集器本身不发布控制动作，它只记录 policy runner 和 Teleop/机器人系统中的消息。真正发布动作的是 `lerobot_bw_policy_runner`。
 
-policy runner 的 residual 合成逻辑是：
+policy runner 的手臂 residual 合成逻辑是：
 
 ```text
 delta_norm      = residual_policy(obs)              # 归一化 residual，通常在 [-1, 1]
 delta_joint     = clip(delta_norm, -1, 1) * residual_limits
 action_final_raw = action.act + residual_lambda * delta_joint
-action_final    = clamp/smoothing(action_final_raw)
+action_final_arm = clamp/smoothing(action_final_raw_arm)
 ```
 
 采集到的 `action.rl_delta` 是 `delta_joint`，单位和 `action.act` 兼容，都是关节位置空间的量。但最终合成时加到 ACT 上的是 `residual_lambda * action.rl_delta`，不是直接加完整 `action.rl_delta`。
@@ -217,7 +220,15 @@ action_final    = clamp/smoothing(action_final_raw)
 action.act + residual_lambda * action.rl_delta
 ```
 
-这是预期行为，因为数据集中记录的是平滑/限幅后的最终发布动作。
+这个关系只检查 14 个手臂维度。夹爪绕过连续 residual 与 smoothing，最终值只能是
+`0.0/0.8`；`action.act` 的夹爪仍保留原始连续 ACT 输出。
+
+旧纠正数据必须先非原地升级后才能和新数据合并。升级器只接受所有帧
+`action.rl_delta[7] == action.rl_delta[15] == 0` 的数据，并补入 `KEEP_BASE`，不会推断旧类别：
+
+```bash
+python3 tools/upgrade_gripper_class_schema.py OLD_DATASET NEW_DATASET
+```
 
 ## 落盘结构
 
@@ -275,7 +286,8 @@ RL 数据集：
 - 图像帧数是否和 parquet 行数匹配；
 - RL 模式下 `control_source/is_intervention` 是否一致；
 - 接管帧 `action.executed` 是否等于 `action.human`；
-- 非接管帧 `action.executed` 与 `action.act + lambda * action.rl_delta` 的差异；
+- 非接管帧 14 维手臂 `action.executed` 与 `action.act + lambda * action.rl_delta` 的差异；
+- 夹爪 delta 是否为零、最终端点、类别值域与独立分类事件数；
 - reward/done/success 事件是否合理。
 
 ## 后续训练如何使用这些字段
@@ -290,7 +302,8 @@ Residual BC 的监督目标：
 
 ```text
 接管帧:
-target = (action.human - action.act) / residual_lambda / residual_limits
+arm_target = (action.human - action.act)[arm_indices] / residual_lambda / residual_limits
+gripper_target = KEEP_BASE / FORCE_OPEN / FORCE_CLOSE
 
 非接管帧:
 target = 0
@@ -300,7 +313,7 @@ Residual SAC 的 transition：
 
 ```text
 obs_t      = [visual_t, state_t, action.act_t]
-action_t   = normalized residual
+action_t   = 14-D normalized arm residual
 reward_t   = reward
 next_obs_t = [visual_t+1, state_t+1, action.act_t+1]
 done_t     = done

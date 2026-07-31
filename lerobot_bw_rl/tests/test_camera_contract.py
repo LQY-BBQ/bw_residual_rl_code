@@ -158,5 +158,5 @@ def test_sac_initialization_rejects_previous_bc_checkpoint(tmp_path: Path) -> No
         checkpoint_path,
     )
 
-    with pytest.raises(ValueError, match="third-generation residual BC checkpoint"):
+    with pytest.raises(ValueError, match="format-v4 hybrid residual BC checkpoint"):
         load_bc_initialization(checkpoint_path)

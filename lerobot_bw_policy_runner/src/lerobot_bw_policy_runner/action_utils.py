@@ -9,8 +9,15 @@ from typing import Iterable
 import numpy as np
 from sensor_msgs.msg import JointState
 
-from .config import ActionClampConfig, ActionSmoothingConfig
-from .constants import ARM_JOINT_NAMES, GRIPPER_JOINT_NAMES, GRIPPER_SHORT_NAMES, JOINT_NAMES
+from .config import ActionClampConfig, ActionSmoothingConfig, GripperControlConfig
+from .constants import (
+    ARM_JOINT_INDICES,
+    ARM_JOINT_NAMES,
+    GRIPPER_JOINT_INDICES,
+    GRIPPER_JOINT_NAMES,
+    GRIPPER_SHORT_NAMES,
+    JOINT_NAMES,
+)
 
 
 @dataclass(slots=True)
@@ -78,13 +85,22 @@ def compose_residual_action(action_act: np.ndarray, delta_norm_or_joint: np.ndar
     normalized residuals are converted to joint-position corrections with configured limits.
     """
     base = np.asarray(action_act, dtype=np.float32).reshape(len(JOINT_NAMES))
-    delta = np.asarray(delta_norm_or_joint, dtype=np.float32).reshape(len(JOINT_NAMES))
-    limits = np.asarray(list(residual_limits), dtype=np.float32).reshape(len(JOINT_NAMES))
+    raw_delta = np.asarray(delta_norm_or_joint, dtype=np.float32).reshape(-1)
+    raw_limits = np.asarray(list(residual_limits), dtype=np.float32).reshape(-1)
+    if raw_delta.size != len(ARM_JOINT_INDICES):
+        raise ValueError(f"Hybrid residual action must have 14 arm values, got {raw_delta.size}")
+    if raw_limits.size != len(ARM_JOINT_INDICES):
+        raise ValueError(f"14-D arm residual requires 14 limits, got {raw_limits.size}")
+    delta = np.zeros(len(JOINT_NAMES), dtype=np.float32)
+    limits = np.zeros(len(JOINT_NAMES), dtype=np.float32)
+    delta[ARM_JOINT_INDICES] = raw_delta
+    limits[ARM_JOINT_INDICES] = raw_limits
     if delta_is_normalized:
         delta = np.clip(delta, -1.0, 1.0) * limits
     else:
         delta = np.clip(delta, -np.abs(limits), np.abs(limits))
     final = base + float(residual_lambda) * delta
+    final[GRIPPER_JOINT_INDICES] = base[GRIPPER_JOINT_INDICES]
     return delta.astype(np.float32), final.astype(np.float32)
 
 
@@ -119,8 +135,9 @@ def split_action_to_joint_states(action: np.ndarray, *, stamp, gripper_name_styl
 class ActionCSVLogger:
     """Optional local CSV debug logger for runner outputs."""
 
-    def __init__(self, log_dir: Path | None) -> None:
+    def __init__(self, log_dir: Path | None, *, gripper_config: GripperControlConfig | None = None) -> None:
         self.log_dir = Path(log_dir).expanduser() if log_dir is not None else None
+        self.gripper_config = gripper_config
         self._file = None
         self._writer = None
         if self.log_dir is not None:
@@ -129,16 +146,52 @@ class ActionCSVLogger:
             fieldnames = ["step", "control_source"]
             for prefix in ["act", "delta", "final"]:
                 fieldnames.extend(f"{prefix}.{name}" for name in JOINT_NAMES)
+            fieldnames.extend(
+                [
+                    "gripper_class.left",
+                    "gripper_class.right",
+                    "gripper_confidence.left",
+                    "gripper_confidence.right",
+                    "gripper_hysteresis_enabled",
+                    "gripper_open_value",
+                    "gripper_close_value",
+                    "gripper_residual_confidence_threshold",
+                    "gripper_residual_confirm_frames",
+                    "gripper_min_hold_s",
+                    "gripper_open_threshold",
+                    "gripper_single_threshold",
+                    "gripper_close_threshold",
+                ]
+            )
             self._writer = csv.DictWriter(self._file, fieldnames=fieldnames)
             self._writer.writeheader()
 
-    def write(self, *, step: int, control_source: int | None, action_act: np.ndarray, delta: np.ndarray, action_final: np.ndarray) -> None:
+    def write(self, *, step: int, control_source: int | None, action_act: np.ndarray, delta: np.ndarray, action_final: np.ndarray, gripper_classes: np.ndarray | None = None, gripper_confidences: np.ndarray | None = None, gripper_hysteresis_enabled: bool | None = None) -> None:
         if self._writer is None:
             return
         row = {"step": step, "control_source": -1 if control_source is None else int(control_source)}
         for prefix, values in [("act", action_act), ("delta", delta), ("final", action_final)]:
             for name, value in zip(JOINT_NAMES, np.asarray(values).reshape(len(JOINT_NAMES))):
                 row[f"{prefix}.{name}"] = float(value)
+        classes = np.zeros(2, dtype=np.int64) if gripper_classes is None else np.asarray(gripper_classes).reshape(2)
+        confidences = np.ones(2, dtype=np.float32) if gripper_confidences is None else np.asarray(gripper_confidences).reshape(2)
+        row["gripper_class.left"], row["gripper_class.right"] = (int(v) for v in classes)
+        row["gripper_confidence.left"], row["gripper_confidence.right"] = (float(v) for v in confidences)
+        row["gripper_hysteresis_enabled"] = int(bool(gripper_hysteresis_enabled))
+        config = self.gripper_config
+        if config is not None:
+            row.update(
+                {
+                    "gripper_open_value": config.open_value,
+                    "gripper_close_value": config.close_value,
+                    "gripper_residual_confidence_threshold": config.residual_confidence_threshold,
+                    "gripper_residual_confirm_frames": config.residual_confirm_frames,
+                    "gripper_min_hold_s": config.min_hold_s,
+                    "gripper_open_threshold": config.hysteresis.open_threshold,
+                    "gripper_single_threshold": config.hysteresis.single_threshold,
+                    "gripper_close_threshold": config.hysteresis.close_threshold,
+                }
+            )
         self._writer.writerow(row)
         if self._file is not None:
             self._file.flush()

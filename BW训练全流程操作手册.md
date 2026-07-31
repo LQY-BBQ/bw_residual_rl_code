@@ -51,19 +51,19 @@ cd ~/mycode/bw_residual_rl_code/lerobot_bw_data_collector
   --robot-sn BW_IZN3E0FU \
   --mode bc \
   --episode-type demo \
-  --dataset-root ~/robot_datasets/lerobot_mantis_data \
-  --session-name pick_block_to_box_v1_ep051 \
+  --dataset-root ~/robot_datasets/pick_block_to_box/ACT_Data \
+  --session-name pick_block_to_box_v1_ep001 \
   --task "pick block to box"
 ```
 
-- 每采一条新数据，只修改 `ep051` 编号，不能与已有目录重名。
+- 每采一条新数据，只修改 `ep001` 编号，不能与已有目录重名。
 - 示教结束时，在采集终端按 `Ctrl+C`，程序会保存当前 episode。
 
 ### 3. 检查数据
 
 ```bash
 ./scripts/check_dataset.sh \
-  ~/robot_datasets/lerobot_mantis_data/pick_block_to_box_v1_ep051 \
+  ~/robot_datasets/pick_block_to_box/ACT_Data/pick_block_to_box_v1_ep001 \
   --mode bc \
   --episode 0 \
   --save-csv
@@ -89,9 +89,9 @@ bash scripts/merge_lerobot_datasets.sh \
 
 ```bash
 bash scripts/merge_lerobot_datasets.sh \
-  --src ~/robot_datasets/pick_block_gen3 \
-  --out ~/robot_datasets/pick_block_gen3_merged \
-  --repo-id local/pick_block_gen3_merged \
+  --src ~/robot_datasets/pick_block_to_box/ACT_Data \
+  --out ~/robot_datasets/pick_block_to_box/ACT_Data/pick_block_to_box_merged \
+  --repo-id local/pick_block_to_box \
   --mode bc \
   --include 'pick_block_to_box_v1_ep*'
 ```
@@ -104,19 +104,19 @@ bash scripts/merge_lerobot_datasets.sh \
 source ~/venvs/lerobot_ros310/bin/activate
 
 lerobot-train \
-  --dataset.repo_id=local/pick_block_gen3_merged \
-  --dataset.root=$HOME/robot_datasets/pick_block_gen3_merged \
+  --dataset.repo_id=local/pick_block_to_box \
+  --dataset.root=$HOME/robot_datasets/pick_block_to_box/ACT_Data/pick_block_to_box_merged \
   --policy.type=act \
   --policy.device=cuda \
   --policy.push_to_hub=false \
-  --output_dir=$HOME/mycode/bw_residual_rl_code/lerobot_bw_policy_runner/outputs/train/act_pick_block_gen3 \
-  --job_name=act_pick_block_gen3 \
+  --output_dir=$HOME/mycode/bw_residual_rl_code/lerobot_bw_policy_runner/outputs/train/act_pick_block_to_box \
+  --job_name=act_pick_block_to_box \
   --wandb.enable=false \
   --seed=1000 \
   --batch_size=8 \
   --num_workers=2 \
   --steps=50000 \
-  --save_freq=10000 \
+  --save_freq=25000 \
   --log_freq=100 \
   --policy.chunk_size=30 \
   --policy.n_action_steps=1 \
@@ -139,7 +139,7 @@ cd ~/mycode/bw_residual_rl_code/lerobot_bw_policy_runner
 ./scripts/run_infer.sh \
   --robot-sn BW_IZN3E0FU \
   --mode act \
-  --policy-path ~/mycode/bw_residual_rl_code/lerobot_bw_policy_runner/outputs/train/act_pick_block_gen3/checkpoints/last/pretrained_model \
+  --policy-path ~/mycode/bw_residual_rl_code/lerobot_bw_policy_runner/outputs/train/act_pick_block_to_box/checkpoints/last/pretrained_model \
   --device cuda \
   --fps 30 \
   --dry-run \
@@ -152,7 +152,7 @@ dry-run 通过后：
 ./scripts/run_infer.sh \
   --robot-sn BW_IZN3E0FU \
   --mode act \
-  --policy-path ~/mycode/bw_residual_rl_code/lerobot_bw_policy_runner/outputs/train/act_pick_block_gen3/checkpoints/last/pretrained_model \
+  --policy-path ~/mycode/bw_residual_rl_code/lerobot_bw_policy_runner/outputs/train/act_pick_block_to_box/checkpoints/last/pretrained_model \
   --device cuda \
   --fps 30
 ```

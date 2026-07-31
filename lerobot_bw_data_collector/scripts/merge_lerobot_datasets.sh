@@ -354,6 +354,7 @@ RL_REQUIRED = {
     "action.rl_delta",
     "action.human",
     "action.executed",
+    "action.gripper_policy_class",
     "reward",
     "done",
     "success",
@@ -562,7 +563,8 @@ def validate_source_compatibility(sources: list[SourceInfo]) -> str:
             fail(
                 f"features schema 不一致：{source.root}\n"
                 f"        {schema_diff(reference.features, source.features)}\n"
-                "        请分别合并不同 schema 的数据，不要填零或强行拼接。"
+                "        请先使用 tools/upgrade_gripper_class_schema.py 升级符合条件的旧纠正数据；"
+                "不要直接混合或强行填零。"
             )
 
     return detected_mode

@@ -14,6 +14,7 @@ from .config import AppConfig
 from .constants import (
     ACTION_ACT_KEY,
     ACTION_EXECUTED_KEY,
+    ACTION_GRIPPER_POLICY_CLASS_KEY,
     ACTION_HUMAN_KEY,
     ACTION_KEY,
     ACTION_RL_DELTA_KEY,
@@ -67,6 +68,10 @@ def _scalar_feature(dtype: str = "float32") -> dict[str, Any]:
     return {"dtype": dtype, "shape": (1,), "names": ["value"]}
 
 
+def _gripper_class_feature() -> dict[str, Any]:
+    return {"dtype": "int64", "shape": (2,), "names": ["left", "right"]}
+
+
 def build_features(sample_images: dict[str, np.ndarray], *, use_videos: bool, mode: str = "bc") -> dict[str, dict]:
     features: dict[str, dict] = {OBS_STATE_KEY: _vector_feature(), ACTION_KEY: _vector_feature()}
     if mode == "rl":
@@ -79,6 +84,7 @@ def build_features(sample_images: dict[str, np.ndarray], *, use_videos: bool, mo
                 ACTION_RL_DELTA_KEY: _vector_feature(),
                 ACTION_HUMAN_KEY: _vector_feature(),
                 ACTION_EXECUTED_KEY: _vector_feature(),
+                ACTION_GRIPPER_POLICY_CLASS_KEY: _gripper_class_feature(),
                 REWARD_KEY: _scalar_feature(),
                 DONE_KEY: _scalar_feature("int64"),
                 SUCCESS_KEY: _scalar_feature("int64"),
@@ -110,6 +116,28 @@ def _scalar(value: Any, dtype=np.float32) -> np.ndarray:
     return np.asarray([value], dtype=dtype)
 
 
+def _validated_rl_actions(sample: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    action = _vec(sample.action)
+    executed = _vec(sample.action_executed)
+    delta = _vec(sample.action_rl_delta, zeros=True)
+    gripper_indices = np.asarray([7, 15], dtype=np.int64)
+    if not np.allclose(delta[gripper_indices], 0.0, rtol=0.0, atol=1e-7):
+        raise ValueError(
+            "action.rl_delta gripper entries must be zero, got "
+            f"{delta[gripper_indices].tolist()}"
+        )
+    delta[gripper_indices] = 0.0
+    for key, values in ((ACTION_KEY, action), (ACTION_EXECUTED_KEY, executed)):
+        grippers = values[gripper_indices]
+        valid = np.isclose(grippers, 0.0, rtol=0.0, atol=1e-6) | np.isclose(
+            grippers, 0.8, rtol=0.0, atol=1e-6
+        )
+        if not np.all(valid):
+            raise ValueError(f"{key} gripper entries must be 0.0 or 0.8, got {grippers.tolist()}")
+        values[gripper_indices] = np.where(grippers >= 0.4, 0.8, 0.0)
+    return action, executed, delta
+
+
 def build_frame(
     sample: Any,
     task: str,
@@ -126,15 +154,24 @@ def build_frame(
     }
     if mode == "rl":
         timing = sample.timing or {}
+        action, action_executed, action_rl_delta = _validated_rl_actions(sample)
+        gripper_policy_class = np.asarray(sample.gripper_policy_class, dtype=np.int64).reshape(2)
+        if not np.all(np.isin(gripper_policy_class, [0, 1, 2])):
+            raise ValueError(
+                f"{ACTION_GRIPPER_POLICY_CLASS_KEY} values must be in {{0,1,2}}, "
+                f"got {gripper_policy_class.tolist()}"
+            )
+        frame[ACTION_KEY] = action
         frame.update(
             {
                 CONTROL_SOURCE_KEY: _scalar(sample.control_source if sample.control_source is not None else -1, np.int64),
                 IS_INTERVENTION_KEY: _scalar(1 if sample.is_intervention else 0, np.int64),
                 HAS_HUMAN_ACTION_KEY: _scalar(1 if sample.has_human_action else 0, np.int64),
                 ACTION_ACT_KEY: _vec(sample.action_act, zeros=True),
-                ACTION_RL_DELTA_KEY: _vec(sample.action_rl_delta, zeros=True),
+                ACTION_RL_DELTA_KEY: action_rl_delta,
                 ACTION_HUMAN_KEY: _vec(sample.action_human, zeros=True),
-                ACTION_EXECUTED_KEY: _vec(sample.action_executed, zeros=True),
+                ACTION_EXECUTED_KEY: action_executed,
+                ACTION_GRIPPER_POLICY_CLASS_KEY: gripper_policy_class,
                 REWARD_KEY: _scalar(float(reward), np.float32),
                 DONE_KEY: _scalar(1 if done else 0, np.int64),
                 SUCCESS_KEY: _scalar(1 if success else 0, np.int64),

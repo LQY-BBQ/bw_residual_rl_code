@@ -18,6 +18,10 @@ JOINT_NAMES = [
     "right_shoulder_pitch_joint", "right_shoulder_yaw_joint", "right_shoulder_roll_joint", "right_elbow_joint",
     "right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint", "right_gripper_joint",
 ]
+ARM_INDICES = np.asarray([index for index, name in enumerate(JOINT_NAMES) if "gripper" not in name], dtype=np.int64)
+GRIPPER_INDICES = np.asarray([JOINT_NAMES.index("left_gripper_joint"), JOINT_NAMES.index("right_gripper_joint")], dtype=np.int64)
+GRIPPER_CLASS_NAMES = ("KEEP_BASE", "FORCE_OPEN", "FORCE_CLOSE")
+GRIPPER_THRESHOLD_EPSILON = 1e-6
 
 
 def _as_vec(x: Any, dim: int = 16) -> np.ndarray:
@@ -109,6 +113,156 @@ class ResidualDatasetConfig:
     observation_stats: ObservationStats | None = None
     normalization_clip: float = 10.0
     use_only_interventions: bool = False
+    gripper_hysteresis_enabled: bool = True
+    gripper_open_threshold: float = 0.20
+    gripper_close_threshold: float = 0.40
+    gripper_single_threshold: float = 0.30
+
+
+def preflight_gripper_event_counts(cfg: ResidualDatasetConfig, minimum: int) -> np.ndarray:
+    """Validate correction coverage without building the expensive visual cache."""
+    df = read_lerobot_parquets(cfg.root)
+    required = ("action.act", "action.executed", "is_intervention")
+    missing = [key for key in required if key not in df.columns]
+    if missing:
+        raise ValueError(f"Dataset is missing gripper-label fields: {missing}")
+    action_act = np.stack([_as_vec(value) for value in df["action.act"]])
+    action_executed = np.stack([_as_vec(value) for value in df["action.executed"]])
+    is_intervention = np.asarray(
+        [_as_scalar(value, 0.0) >= 0.5 for value in df["is_intervention"]], dtype=np.bool_
+    )
+    has_human_action = (
+        np.asarray([_as_scalar(value, 0.0) >= 0.5 for value in df["has_human_action"]], dtype=np.bool_)
+        if "has_human_action" in df.columns
+        else is_intervention.copy()
+    )
+    episode_indices = (
+        np.asarray([int(_as_scalar(value)) for value in df["episode_index"]], dtype=np.int64)
+        if "episode_index" in df.columns
+        else np.zeros(len(df), dtype=np.int64)
+    )
+    classes = build_gripper_classes(
+        action_act,
+        action_executed,
+        is_intervention,
+        has_human_action,
+        episode_indices,
+        hysteresis_enabled=cfg.gripper_hysteresis_enabled,
+        open_threshold=cfg.gripper_open_threshold,
+        close_threshold=cfg.gripper_close_threshold,
+        single_threshold=cfg.gripper_single_threshold,
+    )
+    counts = count_gripper_events(classes, episode_indices)
+    require_gripper_event_counts(counts, minimum)
+    return counts
+
+
+def discretize_gripper_commands(
+    commands: np.ndarray,
+    episode_indices: np.ndarray,
+    *,
+    hysteresis_enabled: bool,
+    open_threshold: float,
+    close_threshold: float,
+    single_threshold: float,
+) -> np.ndarray:
+    """Convert continuous two-gripper commands into latched open/closed states."""
+    values = np.asarray(commands, dtype=np.float32).reshape(-1, 2)
+    episodes = np.asarray(episode_indices, dtype=np.int64).reshape(-1)
+    if len(values) != len(episodes):
+        raise ValueError("Gripper command and episode lengths do not match")
+    if not open_threshold < single_threshold < close_threshold:
+        raise ValueError("Gripper thresholds must satisfy open < single < close")
+    output = np.zeros_like(values, dtype=np.int64)
+    state = np.zeros(2, dtype=np.bool_)
+    previous_episode: int | None = None
+    for index, (command, episode) in enumerate(zip(values, episodes)):
+        if previous_episode is None or int(episode) != previous_episode:
+            threshold = close_threshold if hysteresis_enabled else single_threshold
+            state = command >= threshold - GRIPPER_THRESHOLD_EPSILON
+        elif hysteresis_enabled:
+            state = np.where(
+                state,
+                command > open_threshold + GRIPPER_THRESHOLD_EPSILON,
+                command >= close_threshold - GRIPPER_THRESHOLD_EPSILON,
+            )
+        else:
+            state = command >= single_threshold - GRIPPER_THRESHOLD_EPSILON
+        output[index] = state.astype(np.int64)
+        previous_episode = int(episode)
+    return output
+
+
+def build_gripper_classes(
+    action_act: np.ndarray,
+    action_executed: np.ndarray,
+    is_intervention: np.ndarray,
+    has_human_action: np.ndarray,
+    episode_indices: np.ndarray,
+    *,
+    hysteresis_enabled: bool,
+    open_threshold: float,
+    close_threshold: float,
+    single_threshold: float,
+) -> np.ndarray:
+    base_gripper = discretize_gripper_commands(
+        np.asarray(action_act)[:, GRIPPER_INDICES],
+        episode_indices,
+        hysteresis_enabled=hysteresis_enabled,
+        open_threshold=open_threshold,
+        close_threshold=close_threshold,
+        single_threshold=single_threshold,
+    )
+    executed_gripper = discretize_gripper_commands(
+        np.asarray(action_executed)[:, GRIPPER_INDICES],
+        episode_indices,
+        hysteresis_enabled=hysteresis_enabled,
+        open_threshold=open_threshold,
+        close_threshold=close_threshold,
+        single_threshold=single_threshold,
+    )
+    classes = np.zeros((len(base_gripper), 2), dtype=np.int64)
+    valid_intervention = np.asarray(is_intervention, dtype=np.bool_) & np.asarray(
+        has_human_action, dtype=np.bool_
+    )
+    differs = executed_gripper != base_gripper
+    classes[valid_intervention[:, None] & differs & (executed_gripper == 0)] = 1
+    classes[valid_intervention[:, None] & differs & (executed_gripper == 1)] = 2
+    return classes
+
+
+def count_gripper_events(classes: np.ndarray, episode_indices: np.ndarray) -> np.ndarray:
+    labels = np.asarray(classes, dtype=np.int64).reshape(-1, 2)
+    episodes = np.asarray(episode_indices, dtype=np.int64).reshape(-1)
+    if len(labels) != len(episodes):
+        raise ValueError("Gripper class and episode lengths do not match")
+    counts = np.zeros((2, 3), dtype=np.int64)
+    previous_class = np.zeros(2, dtype=np.int64)
+    previous_episode: int | None = None
+    for values, episode in zip(labels, episodes):
+        episode_changed = previous_episode is None or int(episode) != previous_episode
+        for side in range(2):
+            value = int(values[side])
+            if value != 0 and (episode_changed or value != int(previous_class[side])):
+                counts[side, value] += 1
+        previous_class = values
+        previous_episode = int(episode)
+    return counts
+
+
+def require_gripper_event_counts(counts: np.ndarray, minimum: int) -> None:
+    if minimum < 1:
+        raise ValueError("Minimum gripper event count must be at least 1")
+    missing = []
+    for side, side_name in enumerate(("left", "right")):
+        for class_index in (1, 2):
+            if counts[side, class_index] < minimum:
+                missing.append(
+                    f"{side_name} {GRIPPER_CLASS_NAMES[class_index]}="
+                    f"{counts[side, class_index]} < {minimum}"
+                )
+    if missing:
+        raise ValueError("Insufficient independent gripper correction events: " + ", ".join(missing))
 
 
 class _ResidualDataBase:
@@ -117,6 +271,7 @@ class _ResidualDataBase:
         "action.act",
         "action.human",
         "action.rl_delta",
+        "action.executed",
         "is_intervention",
     )
 
@@ -139,6 +294,7 @@ class _ResidualDataBase:
         self.visual_features = self.visual_cache.features
         self.states = np.stack([_as_vec(value) for value in self.df["observation.state"]]).astype(np.float32)
         self.action_act = np.stack([_as_vec(value) for value in self.df["action.act"]]).astype(np.float32)
+        self.action_executed = np.stack([_as_vec(value) for value in self.df["action.executed"]]).astype(np.float32)
         self.is_intervention = np.asarray(
             [_as_scalar(value, 0.0) >= 0.5 for value in self.df["is_intervention"]], dtype=np.bool_
         )
@@ -148,13 +304,31 @@ class _ResidualDataBase:
             )
         else:
             self.has_human_action = self.is_intervention.copy()
-        self.residual_limits = np.asarray(cfg.residual_limits, dtype=np.float32).reshape(16)
+        self.residual_limits = np.asarray(cfg.residual_limits, dtype=np.float32).reshape(len(ARM_INDICES))
         if np.any(np.abs(self.residual_limits) < 1e-8):
             raise ValueError("All residual limits must be non-zero")
         if cfg.residual_lambda <= 0:
             raise ValueError("residual_lambda must be positive")
         self.obs_dim = int(self.visual_features.shape[1]) + 32
-        self.action_dim = 16
+        self.action_dim = len(ARM_INDICES)
+        self.dataset_action_dim = len(JOINT_NAMES)
+        if "episode_index" in self.df.columns:
+            self.episode_indices = np.asarray(
+                [int(_as_scalar(value)) for value in self.df["episode_index"]], dtype=np.int64
+            )
+        else:
+            self.episode_indices = np.zeros(len(self.df), dtype=np.int64)
+        self.gripper_classes = build_gripper_classes(
+            self.action_act,
+            self.action_executed,
+            self.is_intervention,
+            self.has_human_action,
+            self.episode_indices,
+            hysteresis_enabled=cfg.gripper_hysteresis_enabled,
+            open_threshold=cfg.gripper_open_threshold,
+            close_threshold=cfg.gripper_close_threshold,
+            single_threshold=cfg.gripper_single_threshold,
+        )
         self.observation_stats = cfg.observation_stats
         if self.observation_stats is not None and self.observation_stats.mean.size != self.obs_dim:
             raise ValueError(
@@ -209,15 +383,39 @@ class _ResidualDataBase:
     def _intervention_target(self, index: int) -> np.ndarray:
         human = _as_vec(self.df.iloc[index]["action.human"])
         delta_joint = (human - self.action_act[index]) / float(self.cfg.residual_lambda)
-        normalized = delta_joint / np.abs(self.residual_limits)
+        normalized = delta_joint[ARM_INDICES] / np.abs(self.residual_limits)
         return np.clip(normalized, -1.0, 1.0).astype(np.float32)
 
     def _recorded_residual_target(self, index: int) -> np.ndarray:
         if self.is_intervention[index] and self.has_human_action[index]:
             return self._intervention_target(index)
         delta_joint = _as_vec(self.df.iloc[index]["action.rl_delta"])
-        normalized = delta_joint / np.abs(self.residual_limits)
+        normalized = delta_joint[ARM_INDICES] / np.abs(self.residual_limits)
         return np.clip(normalized, -1.0, 1.0).astype(np.float32)
+
+    def gripper_event_counts(self, indices: Iterable[int] | None = None) -> np.ndarray:
+        selected = np.ones(len(self.df), dtype=np.bool_)
+        if indices is not None:
+            selected[:] = False
+            selected[np.asarray(list(indices), dtype=np.int64)] = True
+        counts = np.zeros((2, 3), dtype=np.int64)
+        previous_class = np.zeros(2, dtype=np.int64)
+        previous_episode: int | None = None
+        for index, (classes, episode) in enumerate(zip(self.gripper_classes, self.episode_indices)):
+            episode_changed = previous_episode is None or int(episode) != previous_episode
+            if selected[index]:
+                for side in range(2):
+                    value = int(classes[side])
+                    if value != 0 and (episode_changed or value != int(previous_class[side])):
+                        counts[side, value] += 1
+            previous_class = classes
+            previous_episode = int(episode)
+        return counts
+
+    def validate_gripper_event_counts(self, minimum: int) -> np.ndarray:
+        counts = self.gripper_event_counts()
+        require_gripper_event_counts(counts, minimum)
+        return counts
 
 
 class ResidualBCDataset(_ResidualDataBase, Dataset):
@@ -248,7 +446,7 @@ class ResidualBCDataset(_ResidualDataBase, Dataset):
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         frame_index = self.indices[index]
         intervention = bool(self.is_intervention[frame_index] and self.has_human_action[frame_index])
-        target = self._intervention_target(frame_index) if intervention else np.zeros(16, dtype=np.float32)
+        target = self._intervention_target(frame_index) if intervention else np.zeros(self.action_dim, dtype=np.float32)
         return {
             "obs": torch.as_tensor(self.obs_at(frame_index), dtype=torch.float32),
             "action": torch.as_tensor(target, dtype=torch.float32),
@@ -256,6 +454,7 @@ class ResidualBCDataset(_ResidualDataBase, Dataset):
                 [self.intervention_loss_weight if intervention else 1.0], dtype=torch.float32
             ),
             "is_intervention": torch.as_tensor([1.0 if intervention else 0.0], dtype=torch.float32),
+            "gripper_class": torch.as_tensor(self.gripper_classes[frame_index], dtype=torch.long),
         }
 
 

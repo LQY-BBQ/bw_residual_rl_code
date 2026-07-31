@@ -6,8 +6,9 @@
 LeRobot 0.4.4
 Python 3.10
 三路相机：env_cam、left_wrist_cam、right_wrist_cam
-状态维度：16
-动作维度：16
+状态与数据集动作维度：16
+Residual BC：14 维连续手臂 + 左右夹爪各 3 类
+Residual RL actor/critic 动作维度：14（夹爪分类网络从 BC 冻结携带）
 ```
 
 ACT 基础策略全部冻结。Residual BC 与 Residual RL 的输入统一为：
@@ -85,7 +86,7 @@ cd ~/mycode/bw_residual_rl_code/lerobot_bw_rl
 
 ## 2. Residual BC 训练
 
-Residual BC 的目标为：
+Residual BC 的手臂目标为：
 
 ```text
 人工接管帧：
@@ -104,7 +105,13 @@ residual_target = 0
 50% 非接管帧
 ```
 
-接管帧默认 loss 权重为 3，网络为确定性 MLP，损失为 Smooth L1。
+接管帧默认 loss 权重为 3，手臂损失为 Smooth L1。夹爪标签为
+`KEEP_BASE/FORCE_OPEN/FORCE_CLOSE`，左右分别使用训练集频次平方根倒数加权交叉熵。
+训练/验证按 episode 做 80/20 划分，四种 FORCE 侧别/方向必须同时出现在两边。
+每侧每种 FORCE 至少需要 20 个独立事件，否则训练会直接停止。
+
+当前已检查的数据还需要至少补采 8 次左夹爪打开纠正和 20 次右夹爪打开纠正；建议
+左开、左关、右开、右关均达到 25 次。
 
 ```bash
 ./scripts/train_bc.sh \
@@ -120,7 +127,10 @@ residual_target = 0
   --intervention-loss-weight 3.0 \
   --residual-lambda 0.2 \
   --residual-limit-default 0.03 \
-  --residual-limit-gripper 0.03 \
+  --gripper-hysteresis \
+  --gripper-open-threshold 0.20 \
+  --gripper-single-threshold 0.30 \
+  --gripper-close-threshold 0.40 \
   --save_freq 2000 \
   --log_freq 100
 ```
@@ -132,6 +142,7 @@ residual_target = 0
   checkpoints/last/residual_bc.pt
   checkpoints/last/config.json
   train_metrics.csv
+  validation_metrics.csv
 ```
 
 ## 3. Residual RL 训练
@@ -140,7 +151,7 @@ residual_target = 0
 
 ```text
 obs_t      = [visual_t, state_t, action_ACT_t]
-a_t        = normalized residual
+a_t        = 14-D normalized arm residual
 reward_t   = 数据集 reward
 obs_next   = [visual_t+1, state_t+1, action_ACT_t+1]
 done_t     = 数据集 done
@@ -163,7 +174,6 @@ done_t     = 数据集 done
   --hidden_dims 256 256 \
   --residual-lambda 0.2 \
   --residual-limit-default 0.03 \
-  --residual-limit-gripper 0.03 \
   --bc-loss-weight 0.1 \
   --cql-alpha 0.1 \
   --save_freq 2000 \
@@ -174,7 +184,8 @@ done_t     = 数据集 done
 
 ```text
 BC trunk -> SAC trunk
-BC mu    -> SAC mu
+BC arm_mu -> SAC mu
+完整 BC actor -> 独立冻结的夹爪分类网络
 ```
 
 SAC 的 `log_std` 单独初始化。代码会检查 ACT 指纹、视觉维度、归一化参数、网络尺寸和残差定义，任何不一致都会停止训练。
@@ -216,9 +227,12 @@ ACT视觉特征定义
 数据集三路源图像尺寸
 ACT三路目标图像尺寸
 第三代相机合同版本和 `none_exact_shape` 图像变换标记
+format_version=4、dataset_action_dim=16、arm action_dim=14
+夹爪分类名称、迟滞标签配置，以及 RL checkpoint 中的冻结 BC 网络
 ```
 
-部署时必须使用训练该 residual 策略时完全相同的 ACT checkpoint。
+部署时必须使用训练该 residual 策略时完全相同的 ACT checkpoint。format v4 不兼容旧的
+连续夹爪 residual checkpoint，旧 checkpoint 必须重新训练。
 
 ## 6. 当前算法范围
 

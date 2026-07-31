@@ -10,7 +10,12 @@ intervention_ratio: 0.5
 intervention_loss_weight: 3.0
 residual_lambda: 0.2
 residual_limit_default: 0.03
-residual_limit_gripper: 0.03
+gripper_hysteresis: true
+gripper_open_threshold: 0.20
+gripper_single_threshold: 0.30
+gripper_close_threshold: 0.40
+gripper_min_events: 20
+gripper_loss_weight: 1.0
 visual_feature_mode: cache
 # Dataset and ACT camera shapes must exactly match the third-generation contract.
 # No image resizing is performed while building frozen ACT features.

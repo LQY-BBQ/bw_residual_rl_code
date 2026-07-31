@@ -9,7 +9,6 @@ batch_size: 256
 hidden_dims: [256, 256]
 residual_lambda: 0.2
 residual_limit_default: 0.03
-residual_limit_gripper: 0.03
 bc_loss_weight: 0.1
 cql_alpha: 0.1
 visual_feature_mode: cache

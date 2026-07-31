@@ -4,7 +4,7 @@ The 16-D order is the contract shared by:
 - LeRobot dataset observation.state
 - LeRobot dataset action
 - policy runner ACT output
-- residual SAC delta output
+- residual SAC debug storage (the policy itself controls 14 arm dimensions)
 """
 from __future__ import annotations
 
@@ -80,6 +80,7 @@ ACTION_ACT_KEY = "action.act"
 ACTION_RL_DELTA_KEY = "action.rl_delta"
 ACTION_HUMAN_KEY = "action.human"
 ACTION_EXECUTED_KEY = "action.executed"
+ACTION_GRIPPER_POLICY_CLASS_KEY = "action.gripper_policy_class"
 REWARD_KEY = "reward"
 DONE_KEY = "done"
 SUCCESS_KEY = "success"

@@ -43,10 +43,19 @@ class DeterministicResidualActor(nn.Module):
         if not hidden_dims:
             raise ValueError("hidden_dims must not be empty")
         self.trunk = MLP(input_dim, hidden_dims, hidden_dims[-1])
-        self.mu = nn.Linear(hidden_dims[-1], action_dim)
+        if action_dim != 14:
+            raise ValueError(f"Hybrid residual BC requires 14 arm actions, got {action_dim}")
+        self.arm_mu = nn.Linear(hidden_dims[-1], action_dim)
+        self.gripper_logits = nn.Linear(hidden_dims[-1], 6)
 
-    def act(self, observation: torch.Tensor, *, deterministic: bool = True) -> torch.Tensor:  # noqa: ARG002
-        return torch.tanh(self.mu(self.trunk(observation)))
+    def act(
+        self,
+        observation: torch.Tensor,
+        *,
+        deterministic: bool = True,  # noqa: ARG002
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        hidden = self.trunk(observation)
+        return torch.tanh(self.arm_mu(hidden)), self.gripper_logits(hidden).reshape(-1, 2, 3)
 
 
 class GaussianResidualActor(nn.Module):
@@ -71,6 +80,7 @@ class GaussianResidualActor(nn.Module):
 @dataclass(slots=True)
 class ResidualPolicyBundle:
     actor: nn.Module
+    gripper_actor: DeterministicResidualActor
     policy_type: str
     device: torch.device
     input_dim: int
@@ -90,6 +100,14 @@ class ResidualPolicyBundle:
     dataset_fps: float
     checkpoint_path: Path
     config: dict[str, Any]
+    gripper_control: dict[str, Any]
+
+
+@dataclass(slots=True)
+class ResidualInference:
+    arm_delta_normalized: np.ndarray
+    gripper_classes: np.ndarray
+    gripper_confidences: np.ndarray
 
 
 def _resolve_checkpoint(path: str | Path) -> Path:
@@ -111,8 +129,8 @@ def load_residual_policy(path: str | Path, *, device: str | torch.device = "cuda
     torch_device = torch.device(device if not isinstance(device, torch.device) else device)
     checkpoint = torch.load(checkpoint_path, map_location=torch_device)
     config: dict[str, Any] = dict(checkpoint.get("config", {}))
-    if int(config.get("format_version", -1)) != 3:
-        raise ValueError("Residual checkpoint is not a third-generation camera checkpoint; retrain it.")
+    if int(config.get("format_version", -1)) != 4:
+        raise ValueError("Residual checkpoint is not format-v4 hybrid arm/gripper checkpoint; retrain it.")
     policy_type = str(config.get("policy_type", "")).lower()
     if policy_type not in {"residual_bc", "residual_rl"}:
         raise ValueError(f"Unsupported residual checkpoint policy_type={policy_type!r}")
@@ -121,8 +139,27 @@ def load_residual_policy(path: str | Path, *, device: str | torch.device = "cuda
     hidden_dims = [int(value) for value in config.get("hidden_dims", [256, 256])]
     if input_dim <= 0:
         raise ValueError("Residual checkpoint is missing a valid obs_dim")
+    if action_dim != 14 or int(config.get("dataset_action_dim", -1)) != 16:
+        raise ValueError("Format-v4 residual checkpoints require action_dim=14 and dataset_action_dim=16")
+    if config.get("gripper_class_names") != ["KEEP_BASE", "FORCE_OPEN", "FORCE_CLOSE"]:
+        raise ValueError("Format-v4 residual checkpoint has an invalid gripper class mapping")
+    gripper_control = config.get("gripper_control")
+    required_gripper_metadata = {
+        "open_value",
+        "close_value",
+        "residual_confidence_threshold",
+        "residual_confirm_frames",
+        "min_hold_s",
+        "hysteresis_enabled",
+        "open_threshold",
+        "single_threshold",
+        "close_threshold",
+    }
+    if not isinstance(gripper_control, dict) or not required_gripper_metadata.issubset(gripper_control):
+        raise ValueError("Format-v4 residual checkpoint is missing gripper control metadata")
+    gripper_actor = DeterministicResidualActor(input_dim, action_dim, hidden_dims)
     if policy_type == "residual_bc":
-        actor: nn.Module = DeterministicResidualActor(input_dim, action_dim, hidden_dims)
+        actor: nn.Module = gripper_actor
     else:
         actor = GaussianResidualActor(input_dim, action_dim, hidden_dims)
     state_dict = checkpoint.get("actor", checkpoint.get("actor_state_dict"))
@@ -130,6 +167,14 @@ def load_residual_policy(path: str | Path, *, device: str | torch.device = "cuda
         raise ValueError("Residual checkpoint is missing actor state_dict")
     actor.load_state_dict(state_dict)
     actor.to(torch_device).eval()
+    if policy_type == "residual_rl":
+        gripper_state = checkpoint.get("gripper_actor")
+        if not isinstance(gripper_state, dict):
+            raise ValueError("Residual RL checkpoint is missing frozen gripper_actor state_dict")
+        gripper_actor.load_state_dict(gripper_state)
+    gripper_actor.to(torch_device).eval()
+    for parameter in gripper_actor.parameters():
+        parameter.requires_grad_(False)
 
     stats = config.get("observation_stats")
     if not isinstance(stats, dict) or "mean" not in stats or "std" not in stats:
@@ -165,14 +210,20 @@ def load_residual_policy(path: str | Path, *, device: str | torch.device = "cuda
     dataset_fps = float(config.get("dataset_fps", 0.0))
     if not np.isclose(dataset_fps, 30.0, rtol=0.0, atol=1e-6):
         raise ValueError("Residual checkpoint must be trained from a 30 FPS dataset")
+    residual_limits = np.asarray(config.get("residual_limits", []), dtype=np.float32).reshape(-1)
+    if residual_limits.size != action_dim or not np.all(np.isfinite(residual_limits)):
+        raise ValueError("Format-v4 residual checkpoint must contain 14 finite residual limits")
+    if np.any(residual_limits <= 0):
+        raise ValueError("Format-v4 residual checkpoint residual limits must be positive")
     return ResidualPolicyBundle(
         actor=actor,
+        gripper_actor=gripper_actor,
         policy_type=policy_type,
         device=torch_device,
         input_dim=input_dim,
         visual_feature_dim=visual_feature_dim,
         action_dim=action_dim,
-        residual_limits=np.asarray(config.get("residual_limits", [0.03] * action_dim), dtype=np.float32),
+        residual_limits=residual_limits,
         residual_lambda=float(config.get("residual_lambda", 0.2)),
         observation_mean=observation_mean,
         observation_std=observation_std,
@@ -186,6 +237,7 @@ def load_residual_policy(path: str | Path, *, device: str | torch.device = "cuda
         dataset_fps=dataset_fps,
         checkpoint_path=checkpoint_path,
         config=config,
+        gripper_control=dict(gripper_control),
     )
 
 
@@ -218,4 +270,34 @@ def infer_residual_delta(
     tensor = torch.as_tensor(normalized, dtype=torch.float32, device=bundle.device).reshape(1, -1)
     with torch.inference_mode():
         action = bundle.actor.act(tensor, deterministic=deterministic)
+    if isinstance(action, tuple):
+        action = action[0]
     return action.detach().cpu().numpy().reshape(-1).astype(np.float32)
+
+
+def infer_residual_action(
+    bundle: ResidualPolicyBundle,
+    residual_obs: np.ndarray,
+    *,
+    deterministic: bool = True,
+) -> ResidualInference:
+    raw = np.asarray(residual_obs, dtype=np.float32).reshape(-1)
+    if raw.size != bundle.input_dim:
+        raise ValueError(f"Residual policy expected obs_dim={bundle.input_dim}, got {raw.size}")
+    normalized = (raw - bundle.observation_mean) / bundle.observation_std
+    if bundle.normalization_clip > 0:
+        normalized = np.clip(normalized, -bundle.normalization_clip, bundle.normalization_clip)
+    tensor = torch.as_tensor(normalized, dtype=torch.float32, device=bundle.device).reshape(1, -1)
+    with torch.inference_mode():
+        if bundle.policy_type == "residual_bc":
+            arm, logits = bundle.gripper_actor.act(tensor, deterministic=True)
+        else:
+            arm = bundle.actor.act(tensor, deterministic=deterministic)
+            _, logits = bundle.gripper_actor.act(tensor, deterministic=True)
+        probabilities = torch.softmax(logits, dim=-1)
+        confidences, classes = probabilities.max(dim=-1)
+    return ResidualInference(
+        arm_delta_normalized=arm.detach().cpu().numpy().reshape(-1).astype(np.float32),
+        gripper_classes=classes.detach().cpu().numpy().reshape(2).astype(np.int64),
+        gripper_confidences=confidences.detach().cpu().numpy().reshape(2).astype(np.float32),
+    )

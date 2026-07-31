@@ -19,6 +19,7 @@ from bw_datasets.residual_transition_dataset import (
     ResidualTransitionDataset,
 )
 from policies.act_shared_encoder import act_policy_fingerprint
+from policies.residual_bc_policy import DeterministicResidualActor
 from policies.residual_sac_policy import Critic, SACBatch, SquashedGaussianActor
 from visual_cache import build_visual_feature_cache, default_cache_dir
 
@@ -36,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset.repo_id", dest="repo_id", default=None)
     parser.add_argument("--act-policy-path", type=Path, required=True)
     parser.add_argument("--output_dir", type=Path, required=True)
-    parser.add_argument("--init-from-bc", type=Path, default=None)
+    parser.add_argument("--init-from-bc", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--steps", type=int, default=20000)
@@ -54,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--demo-sample-ratio", type=float, default=0.0, help="Reserved for future RLPD buffers.")
     parser.add_argument("--residual-lambda", type=float, default=0.2)
     parser.add_argument("--residual-limit-default", type=float, default=0.03)
-    parser.add_argument("--residual-limit-gripper", type=float, default=0.03)
+    parser.add_argument("--residual-limit-gripper", type=float, default=None)
     parser.add_argument("--normalization-clip", type=float, default=10.0)
     parser.add_argument("--use-only-interventions", action="store_true")
     parser.add_argument("--visual-feature-mode", choices=["cache", "online"], default="cache")
@@ -78,12 +79,8 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def residual_limits(default: float, gripper: float) -> np.ndarray:
-    values = np.full(len(JOINT_NAMES), float(default), dtype=np.float32)
-    for index, name in enumerate(JOINT_NAMES):
-        if name.endswith("gripper_joint"):
-            values[index] = float(gripper)
-    return values
+def residual_limits(default: float, gripper: float | None) -> np.ndarray:  # noqa: ARG001
+    return np.full(14, float(default), dtype=np.float32)
 
 
 def to_device(batch: dict[str, torch.Tensor], device: torch.device) -> SACBatch:
@@ -119,10 +116,28 @@ def load_bc_initialization(path: str | Path) -> tuple[dict[str, Any], dict[str, 
     checkpoint_path = _resolve_checkpoint(path, ("residual_bc.pt", "checkpoint.pt", "last.pt"))
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     config = dict(checkpoint.get("config", {}))
-    if int(config.get("format_version", -1)) != 3:
-        raise ValueError("--init-from-bc requires a third-generation residual BC checkpoint")
+    if int(config.get("format_version", -1)) != 4:
+        raise ValueError("--init-from-bc requires a format-v4 hybrid residual BC checkpoint")
     if config.get("policy_type") != "residual_bc":
         raise ValueError(f"--init-from-bc requires a residual_bc checkpoint, got {config.get('policy_type')}")
+    if int(config.get("action_dim", -1)) != 14 or int(config.get("dataset_action_dim", -1)) != 16:
+        raise ValueError("--init-from-bc requires action_dim=14 and dataset_action_dim=16")
+    if config.get("gripper_class_names") != ["KEEP_BASE", "FORCE_OPEN", "FORCE_CLOSE"]:
+        raise ValueError("--init-from-bc checkpoint has an invalid gripper class mapping")
+    gripper_control = config.get("gripper_control")
+    required_gripper_metadata = {
+        "open_value",
+        "close_value",
+        "residual_confidence_threshold",
+        "residual_confirm_frames",
+        "min_hold_s",
+        "hysteresis_enabled",
+        "open_threshold",
+        "single_threshold",
+        "close_threshold",
+    }
+    if not isinstance(gripper_control, dict) or not required_gripper_metadata.issubset(gripper_control):
+        raise ValueError("--init-from-bc checkpoint is missing gripper control metadata")
     state_dict = checkpoint.get("actor")
     if not isinstance(state_dict, dict):
         raise ValueError("Residual BC checkpoint is missing actor state_dict")
@@ -171,18 +186,38 @@ def initialize_actor_from_bc(
         raise ValueError(
             "Residual BC and SAC must use identical residual_limits because the actor output is normalized by them."
         )
-    missing, unexpected = actor.load_state_dict(bc_state, strict=False)
-    allowed_missing = {"log_std.weight", "log_std.bias"}
-    if set(missing) != allowed_missing or unexpected:
-        raise ValueError(f"Could not initialize SAC actor from BC. missing={missing}, unexpected={unexpected}")
+    trunk_state = {
+        key.removeprefix("trunk."): value
+        for key, value in bc_state.items()
+        if key.startswith("trunk.")
+    }
+    actor.trunk.load_state_dict(trunk_state)
+    try:
+        actor.mu.weight.data.copy_(bc_state["arm_mu.weight"])
+        actor.mu.bias.data.copy_(bc_state["arm_mu.bias"])
+    except KeyError as exc:
+        raise ValueError(f"Residual BC checkpoint is missing hybrid arm head: {exc}") from exc
     with torch.no_grad():
         actor.log_std.weight.zero_()
         actor.log_std.bias.fill_(-2.0)
 
 
-def save_checkpoint(path: Path, *, actor: SquashedGaussianActor, config: dict[str, Any]) -> None:
+def save_checkpoint(
+    path: Path,
+    *,
+    actor: SquashedGaussianActor,
+    gripper_actor: DeterministicResidualActor,
+    config: dict[str, Any],
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"actor": actor.state_dict(), "config": config}, path)
+    torch.save(
+        {
+            "actor": actor.state_dict(),
+            "gripper_actor": gripper_actor.state_dict(),
+            "config": config,
+        },
+        path,
+    )
     (path.parent / "config.json").write_text(
         json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8"
     )
@@ -217,15 +252,13 @@ def main() -> int:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device(args.device if not args.device.startswith("cuda") or torch.cuda.is_available() else "cpu")
     limits = residual_limits(args.residual_limit_default, args.residual_limit_gripper)
+    if args.residual_limit_gripper is not None:
+        print("WARNING: --residual-limit-gripper is deprecated and ignored; SAC trains arm actions only.")
     visual_cache = _prepare_visual_cache(args)
 
-    bc_config: dict[str, Any] | None = None
-    bc_state: dict[str, torch.Tensor] | None = None
-    bc_path: Path | None = None
-    observation_stats: ObservationStats | None = None
-    if args.init_from_bc is not None:
-        bc_config, bc_state, bc_path = load_bc_initialization(args.init_from_bc)
-        observation_stats = ObservationStats.from_dict(bc_config["observation_stats"])
+    bc_config, bc_state, bc_path = load_bc_initialization(args.init_from_bc)
+    observation_stats = ObservationStats.from_dict(bc_config["observation_stats"])
+    gripper_control = dict(bc_config.get("gripper_control", {}))
 
     dataset = ResidualTransitionDataset(
         ResidualDatasetConfig(
@@ -236,6 +269,10 @@ def main() -> int:
             observation_stats=observation_stats,
             normalization_clip=args.normalization_clip,
             use_only_interventions=args.use_only_interventions,
+            gripper_hysteresis_enabled=bool(gripper_control.get("hysteresis_enabled", True)),
+            gripper_open_threshold=float(gripper_control.get("open_threshold", 0.20)),
+            gripper_close_threshold=float(gripper_control.get("close_threshold", 0.40)),
+            gripper_single_threshold=float(gripper_control.get("single_threshold", 0.30)),
         )
     )
     if dataset.observation_stats is None:
@@ -254,29 +291,33 @@ def main() -> int:
     obs_dim = dataset.obs_dim
     action_dim = dataset.action_dim
     actor = SquashedGaussianActor(obs_dim, action_dim, args.hidden_dims).to(device)
-    if bc_config is not None and bc_state is not None:
-        initialize_actor_from_bc(
-            actor,
-            bc_config=bc_config,
-            bc_state=bc_state,
-            obs_dim=obs_dim,
-            action_dim=action_dim,
-            hidden_dims=args.hidden_dims,
-            act_fingerprint_value=dataset.act_fingerprint,
-            residual_lambda=args.residual_lambda,
-            residual_limits=limits,
-            camera_contract_metadata={
-                key: visual_cache.metadata.get(key)
-                for key in (
-                    "dataset_fps",
-                    "source_image_shapes",
-                    "policy_image_shapes",
-                    "camera_contract_version",
-                    "image_transform",
-                )
-            },
-        )
-        print(f"Initialized SAC actor trunk and mean head from: {bc_path}")
+    initialize_actor_from_bc(
+        actor,
+        bc_config=bc_config,
+        bc_state=bc_state,
+        obs_dim=obs_dim,
+        action_dim=action_dim,
+        hidden_dims=args.hidden_dims,
+        act_fingerprint_value=dataset.act_fingerprint,
+        residual_lambda=args.residual_lambda,
+        residual_limits=limits,
+        camera_contract_metadata={
+            key: visual_cache.metadata.get(key)
+            for key in (
+                "dataset_fps",
+                "source_image_shapes",
+                "policy_image_shapes",
+                "camera_contract_version",
+                "image_transform",
+            )
+        },
+    )
+    gripper_actor = DeterministicResidualActor(obs_dim, action_dim, args.hidden_dims).to(device)
+    gripper_actor.load_state_dict(bc_state)
+    gripper_actor.eval()
+    for parameter in gripper_actor.parameters():
+        parameter.requires_grad_(False)
+    print(f"Initialized SAC arm actor and frozen gripper actor from: {bc_path}")
     q1 = Critic(obs_dim, action_dim, args.hidden_dims).to(device)
     q2 = Critic(obs_dim, action_dim, args.hidden_dims).to(device)
     q1_target = Critic(obs_dim, action_dim, args.hidden_dims).to(device)
@@ -291,13 +332,14 @@ def main() -> int:
     target_entropy = float(args.target_entropy if args.target_entropy is not None else -action_dim)
 
     config: dict[str, Any] = {
-        "format_version": 3,
+        "format_version": 4,
         "policy_type": "residual_rl",
         "algorithm": "offline_sac_cql",
         "obs_mode": "act_visual_state_act",
         "obs_dim": obs_dim,
         "visual_feature_dim": dataset.visual_feature_dim,
         "action_dim": action_dim,
+        "dataset_action_dim": dataset.dataset_action_dim,
         "hidden_dims": list(args.hidden_dims),
         "observation_stats": observation_stats.to_dict(),
         "residual_limits": limits.tolist(),
@@ -315,7 +357,11 @@ def main() -> int:
         "act_parameters_frozen": True,
         "bc_loss_weight": float(args.bc_loss_weight),
         "cql_alpha": float(args.cql_alpha),
+        "target_entropy": target_entropy,
         "init_from_bc": str(bc_path) if bc_path else None,
+        "gripper_class_names": ["KEEP_BASE", "FORCE_OPEN", "FORCE_CLOSE"],
+        "gripper_control": gripper_control,
+        "gripper_policy_frozen": True,
     }
     metrics_path = args.output_dir / "train_metrics.csv"
     metrics_path.write_text(
@@ -400,16 +446,18 @@ def main() -> int:
             save_checkpoint(
                 args.output_dir / "checkpoints" / f"step_{step:06d}" / "residual_rl.pt",
                 actor=actor,
+                gripper_actor=gripper_actor,
                 config=config,
             )
             save_checkpoint(
                 args.output_dir / "checkpoints" / "last" / "residual_rl.pt",
                 actor=actor,
+                gripper_actor=gripper_actor,
                 config=config,
             )
 
     final_path = args.output_dir / "checkpoints" / "last" / "residual_rl.pt"
-    save_checkpoint(final_path, actor=actor, config=config)
+    save_checkpoint(final_path, actor=actor, gripper_actor=gripper_actor, config=config)
     print(f"Saved final residual RL checkpoint: {final_path}")
     return 0
 

@@ -3,7 +3,7 @@
 这个脚本用于检查 `lerobot_bw_data_collector` 采集得到的 LeRobot 数据集。它同时支持两类数据：
 
 1. **BC / 模仿学习数据**：检查 `observation.state` 和 `action`，生成和旧版数据检查程序类似的关节曲线、误差统计、相关性检查、数值范围对比和相机抽帧图。
-2. **RL / residual 强化学习数据**：检查 `control_source`、`is_intervention`、`action.act`、`action.rl_delta`、`action.human`、`action.executed`、`reward`、`done`、`success` 和 `timing.*`。
+2. **RL / residual 强化学习数据**：额外检查 `action.gripper_policy_class`、16 维存储契约、夹爪零 residual 和 `0.0/0.8` 最终端点。
 
 当前版本的 RL reward 检查**不再依赖** `annotations/episode_000000.json`。检查程序直接读取 parquet 数据里的 `reward`、`done`、`success` 字段。
 
@@ -141,13 +141,13 @@ action               -> 应等于 action.executed
 reward/done/success  -> 直接从 parquet 字段读取并检查键盘标注规则
 ```
 
-非接管时，理论上：
+非接管时，14 个手臂维度理论上：
 
 ```text
 action.executed ≈ action.act + residual_lambda * action.rl_delta
 ```
 
-但是当前 policy runner 可能启用了 smoothing / clamp，保存的 debug final 是平滑后的最终动作，所以这个误差不一定代表数据错误。脚本会画出 `executed_reconstruction_error.png`，并在 `rl_summary.txt` 中说明。
+夹爪不使用这个连续公式：`action.rl_delta[7/15]` 必须为零，最终夹爪必须为 `0.0/0.8`，类别字段只能取 `{0,1,2}`。脚本还会统计左右 FORCE 类别的独立连续事件。手臂可能启用了 smoothing / clamp，因此其重建误差不一定代表数据错误。
 
 ## 键盘 reward 标注规则
 

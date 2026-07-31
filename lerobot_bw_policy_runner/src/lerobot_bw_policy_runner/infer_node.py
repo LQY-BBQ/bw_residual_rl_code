@@ -30,17 +30,19 @@ from .action_utils import (
 )
 from .config import default_config_path, load_config
 from .constants import (
+    GRIPPER_JOINT_INDICES,
     BW_IMAGE_HWC_SHAPES,
     CAMERA_CONTRACT_VERSION,
     IMAGE_TRANSFORM,
     JOINT_NAMES,
 )
+from .gripper_control import BinaryGripperController
 from .policy_loader import (
     infer_action,
     infer_action_with_shared_visual_feature,
     load_policy_bundle,
 )
-from .residual_policy import build_residual_runtime_obs, infer_residual_delta, load_residual_policy
+from .residual_policy import build_residual_runtime_obs, infer_residual_action, load_residual_policy
 from .ros_io import BWObservationReader, init_ros
 
 _SHOULD_STOP = False
@@ -70,6 +72,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--max-steps", type=int, default=0)
     parser.add_argument("--log-dir", type=Path, default=None)
+    hysteresis = parser.add_mutually_exclusive_group()
+    hysteresis.add_argument("--gripper-hysteresis", dest="gripper_hysteresis", action="store_true")
+    hysteresis.add_argument("--no-gripper-hysteresis", dest="gripper_hysteresis", action="store_false")
+    parser.set_defaults(gripper_hysteresis=None)
     return parser.parse_args(argv)
 
 
@@ -171,6 +177,7 @@ def main(argv: list[str] | None = None) -> int:
         dry_run=args.dry_run if args.dry_run else None,
         task=args.task,
         log_dir=args.log_dir,
+        gripper_hysteresis=args.gripper_hysteresis,
     )
     if config.inference.policy_path is None:
         print("ERROR: ACT policy path is required.", file=sys.stderr)
@@ -190,9 +197,10 @@ def main(argv: list[str] | None = None) -> int:
     reader: BWObservationReader | None = None
     executor: SingleThreadedExecutor | None = None
     spin_thread: threading.Thread | None = None
-    csv_logger = ActionCSVLogger(config.inference.log_dir)
+    csv_logger = ActionCSVLogger(config.inference.log_dir, gripper_config=config.inference.gripper)
     step_count = 0
     filter_state = ActionFilterState()
+    gripper_controller = BinaryGripperController(config.inference.gripper)
 
     try:
         print("[1/4] Loading frozen ACT policy...")
@@ -234,6 +242,38 @@ def main(argv: list[str] | None = None) -> int:
                 print(
                     "WARNING: runtime residual lambda differs from training: "
                     f"runtime={runtime_lambda}, training={residual_bundle.residual_lambda}"
+                )
+            runtime_hysteresis = config.inference.gripper.hysteresis
+            training_label_config = residual_bundle.gripper_control
+            mismatch = []
+            comparisons = (
+                ("hysteresis_enabled", runtime_hysteresis.enabled),
+                ("open_value", config.inference.gripper.open_value),
+                ("close_value", config.inference.gripper.close_value),
+                (
+                    "residual_confidence_threshold",
+                    config.inference.gripper.residual_confidence_threshold,
+                ),
+                ("residual_confirm_frames", config.inference.gripper.residual_confirm_frames),
+                ("min_hold_s", config.inference.gripper.min_hold_s),
+                ("open_threshold", runtime_hysteresis.open_threshold),
+                ("single_threshold", runtime_hysteresis.single_threshold),
+                ("close_threshold", runtime_hysteresis.close_threshold),
+            )
+            for key, runtime_value in comparisons:
+                training_value = training_label_config.get(key)
+                if training_value is not None and (
+                    bool(training_value) != bool(runtime_value)
+                    if key == "hysteresis_enabled"
+                    else int(training_value) != int(runtime_value)
+                    if key == "residual_confirm_frames"
+                    else not np.isclose(float(training_value), float(runtime_value), rtol=0.0, atol=1e-9)
+                ):
+                    mismatch.append(f"{key}: runtime={runtime_value}, training={training_value}")
+            if mismatch:
+                print(
+                    "WARNING: runtime gripper control differs from residual checkpoint metadata: "
+                    + "; ".join(mismatch)
                 )
 
         print("\n[2/4] Connecting to ROS2 topics...")
@@ -283,6 +323,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Mode: {config.inference.mode}")
         print(f"Publishing arm action to:     {config.robot.output_topics.arm_action}")
         print(f"Publishing gripper action to: {config.robot.output_topics.gripper_action}")
+        gripper_config = config.inference.gripper
+        print(
+            "Gripper control: "
+            f"hysteresis={gripper_config.hysteresis.enabled} "
+            f"thresholds={gripper_config.hysteresis.open_threshold:g}/"
+            f"{gripper_config.hysteresis.single_threshold:g}/"
+            f"{gripper_config.hysteresis.close_threshold:g} "
+            f"commands={gripper_config.open_value:g}/{gripper_config.close_value:g} "
+            f"confidence={gripper_config.residual_confidence_threshold:g} "
+            f"confirm_frames={gripper_config.residual_confirm_frames} "
+            f"min_hold_s={gripper_config.min_hold_s:g}"
+        )
         if config.inference.dry_run:
             print("Dry-run enabled: no output/debug messages are published.")
 
@@ -293,7 +345,7 @@ def main(argv: list[str] | None = None) -> int:
         last_log_time = time.monotonic()
         missed_deadlines = 0
         camera_wait_cycles = 0
-        zero_delta = np.zeros(len(JOINT_NAMES), dtype=np.float32)
+        zero_arm_delta = np.zeros(len(JOINT_NAMES) - len(GRIPPER_JOINT_INDICES), dtype=np.float32)
         residual_limits = (
             residual_bundle.residual_limits
             if residual_bundle is not None
@@ -344,7 +396,10 @@ def main(argv: list[str] | None = None) -> int:
                         robot_type=config.inference.robot_type,
                     )
                 action_act = align_action_vector(raw_act, sample.observation_state, expected_dim=len(JOINT_NAMES))
-                delta_joint = zero_delta.copy()
+                delta_norm_arm = zero_arm_delta.copy()
+                gripper_classes = np.zeros(2, dtype=np.int64)
+                gripper_confidences = np.ones(2, dtype=np.float32)
+                delta_joint = np.zeros(len(JOINT_NAMES), dtype=np.float32)
                 action_final_raw = action_act.copy()
                 if residual_bundle is not None:
                     assert act_feature is not None
@@ -353,14 +408,17 @@ def main(argv: list[str] | None = None) -> int:
                         action_act=action_act,
                         act_feature=act_feature,
                     )
-                    delta_norm = infer_residual_delta(
+                    residual_output = infer_residual_action(
                         residual_bundle,
                         residual_obs,
                         deterministic=config.inference.residual.deterministic,
                     )
+                    delta_norm_arm = residual_output.arm_delta_normalized
+                    gripper_classes = residual_output.gripper_classes
+                    gripper_confidences = residual_output.gripper_confidences
                     delta_joint, action_final_raw = compose_residual_action(
                         action_act,
-                        delta_norm,
+                        delta_norm_arm,
                         residual_limits=residual_limits,
                         residual_lambda=runtime_residual_lambda,
                         delta_is_normalized=True,
@@ -373,6 +431,16 @@ def main(argv: list[str] | None = None) -> int:
                     config.inference.smoothing,
                     filter_state,
                 )
+                gripper_result = gripper_controller.step(
+                    action_act[GRIPPER_JOINT_INDICES],
+                    gripper_classes,
+                    gripper_confidences,
+                    now_s=sample_time,
+                )
+                action_composed_debug = action_final_raw.copy()
+                action_composed_debug[GRIPPER_JOINT_INDICES] = gripper_result.candidate_action
+                action_final[GRIPPER_JOINT_INDICES] = gripper_result.final_action
+                filter_state.previous_action = action_final.astype(np.float32, copy=True)
                 stamp = reader.get_clock().now().to_msg()
                 arm_msg, gripper_msg = split_action_to_joint_states(
                     action_final,
@@ -382,7 +450,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 debug_act = vector_to_joint_state(action_act, stamp=stamp)
                 debug_delta = vector_to_joint_state(delta_joint, stamp=stamp)
-                debug_composed = vector_to_joint_state(action_final_raw, stamp=stamp)
+                debug_composed = vector_to_joint_state(action_composed_debug, stamp=stamp)
                 debug_final = vector_to_joint_state(action_final, stamp=stamp)
                 reader.publish_action(arm_msg, gripper_msg, dry_run=config.inference.dry_run)
                 reader.publish_debug_actions(
@@ -390,6 +458,7 @@ def main(argv: list[str] | None = None) -> int:
                     debug_delta,
                     debug_composed,
                     debug_final,
+                    gripper_result.raw_classes,
                     dry_run=config.inference.dry_run,
                 )
                 csv_logger.write(
@@ -398,6 +467,9 @@ def main(argv: list[str] | None = None) -> int:
                     action_act=action_act,
                     delta=delta_joint,
                     action_final=action_final,
+                    gripper_classes=gripper_result.raw_classes,
+                    gripper_confidences=gripper_result.confidences,
+                    gripper_hysteresis_enabled=config.inference.gripper.hysteresis.enabled,
                 )
                 step_count += 1
 

@@ -149,6 +149,8 @@ cd ~/mycode/bw_residual_rl_code/lerobot_bw_policy_runner
 dry-run 通过后：
 
 ```bash
+cd ~/mycode/bw_residual_rl_code/lerobot_bw_policy_runner
+
 ./scripts/run_infer.sh \
   --robot-sn BW_IZN3E0FU \
   --mode act \
@@ -198,10 +200,11 @@ cd ~/mycode/bw_residual_rl_code/lerobot_bw_data_collector
 | 手柄 `-` | 退回人工控制 |
 | 采集终端 `a` | 左阶段完成，reward `+1`，不结束 |
 | 采集终端 `d` | 右阶段完成，总 reward `+2`，成功结束 |
+| 采集终端 `s` | 两块都进入盒子且右块叠在左块上，reward `+3`，成功结束 |
 | 采集终端 `g` | 手动成功，reward `+1`，结束 |
 | 采集终端 `j` | 手动失败，reward `+0`，结束 |
 
-RL 成功 episode 使用 `d` 或 `g` 结束，失败使用 `j`。`Ctrl+C` 或 `--max-frames` 会把最后一帧标记为失败。reward/done/success 已直接写入数据集，不需要旧的 annotation JSON 流程。
+RL 普通成功 episode 使用 `d` 结束，堆叠成功使用 `s` 结束，通用手动成功使用 `g`，失败使用 `j`。正常按 `a` 后再按 `s` 时总 reward 为 `4`。`Ctrl+C` 或 `--max-frames` 会把最后一帧标记为失败。reward/done/success 已直接写入数据集，不需要旧的 annotation JSON 流程。
 
 ## 六、合并纠正数据并训练 Residual BC
 

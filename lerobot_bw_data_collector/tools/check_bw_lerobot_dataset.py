@@ -742,6 +742,10 @@ def infer_keyboard_reward_event_type(reward_value: float, done_value: float, suc
         return "left_stage_done_key_a"
     if _near(reward_value, 2.0) and is_done and is_success:
         return "right_stage_done_success_key_d"
+    if _near(reward_value, 3.0) and is_done and is_success:
+        return "stacked_success_key_s"
+    if _near(reward_value, 4.0) and is_done and is_success:
+        return "left_and_stacked_success_keys_a_s"
     if _near(reward_value, 1.0) and is_done and is_success:
         return "manual_success_key_g"
     if _near(reward_value, 0.0) and is_done and not is_success:
@@ -769,14 +773,14 @@ def check_keyboard_reward_semantics(reward: np.ndarray, done: np.ndarray, succes
     if np.isfinite(reward).any() and np.nanmin(reward) < -tol:
         add_warning(warnings, "WARN", "reward_negative", "reward contains negative values. Current keyboard reward rule expects non-negative rewards.", min_reward=float(np.nanmin(reward)))
 
-    valid_reward_values = np.array([0.0, 1.0, 2.0], dtype=np.float64)
+    valid_reward_values = np.array([0.0, 1.0, 2.0, 3.0, 4.0], dtype=np.float64)
     finite_reward = reward[np.isfinite(reward)]
     if finite_reward.size:
         distance = np.min(np.abs(finite_reward.reshape(-1, 1) - valid_reward_values.reshape(1, -1)), axis=1)
         bad_count = int(np.sum(distance > tol))
         if bad_count > 0:
             unique_bad = sorted({float(v) for v, d in zip(finite_reward.tolist(), distance.tolist()) if d > tol})
-            add_warning(warnings, "WARN", "unexpected_reward_values", f"reward contains {bad_count} value(s) outside expected keyboard set {{0,1,2}}.", values=unique_bad[:20])
+            add_warning(warnings, "WARN", "unexpected_reward_values", f"reward contains {bad_count} value(s) outside expected keyboard set {{0,1,2,3,4}}.", values=unique_bad[:20])
 
     for name, values in [("done", done), ("success", success)]:
         bad = ~is_binary_like(values, tol=tol)
@@ -784,14 +788,14 @@ def check_keyboard_reward_semantics(reward: np.ndarray, done: np.ndarray, succes
             add_warning(warnings, "WARN", f"{name}_not_binary", f"{name} contains values other than 0/1.", count=int(np.sum(bad)))
 
     if np.nanmax(np.abs(reward)) < 1e-12:
-        add_warning(warnings, "WARN", "reward_all_zero", "reward is all zero. For RL training data, press a/d/g during successful collection or j for a marked failure.")
+        add_warning(warnings, "WARN", "reward_all_zero", "reward is all zero. For RL training data, press a/d/s/g during successful collection or j for a marked failure.")
 
     done_idx = np.flatnonzero(done >= 0.5)
     success_idx = np.flatnonzero(success >= 0.5)
     if n == 0:
         add_warning(warnings, "ERROR", "empty_episode", "Episode has zero frames.")
     elif done_idx.size == 0:
-        add_warning(warnings, "WARN", "missing_done", "No done=1 frame found. A normally saved keyboard-labeled RL episode should end with d/g/j.")
+        add_warning(warnings, "WARN", "missing_done", "No done=1 frame found. A normally saved keyboard-labeled RL episode should end with d/s/g/j.")
     elif not (done_idx.size == 1 and done_idx[-1] == n - 1):
         add_warning(warnings, "WARN", "done_not_only_final", f"done=1 appears at frames {done_idx.tolist()}, expected only final frame {n-1}.")
 
@@ -805,9 +809,9 @@ def check_keyboard_reward_semantics(reward: np.ndarray, done: np.ndarray, succes
         last_done = float(done[-1])
         last_success = float(success[-1])
         if last_done < 0.5:
-            add_warning(warnings, "WARN", "last_frame_not_done", "Final frame is not done=1. Press d/g/j to end an RL episode cleanly.")
+            add_warning(warnings, "WARN", "last_frame_not_done", "Final frame is not done=1. Press d/s/g/j to end an RL episode cleanly.")
         if last_success >= 0.5 and last_reward < 1.0 - tol:
-            add_warning(warnings, "WARN", "terminal_success_reward_too_small", "Final frame has success=1 but reward < 1. Expected g -> reward=1 or d -> reward=2.", last_reward=last_reward)
+            add_warning(warnings, "WARN", "terminal_success_reward_too_small", "Final frame has success=1 but reward < 1. Expected g -> reward=1, d -> reward=2, or s -> reward=3.", last_reward=last_reward)
         if last_success < 0.5 and last_done >= 0.5 and abs(last_reward) > tol:
             add_warning(warnings, "WARN", "terminal_failure_nonzero_reward", "Final frame is a failure but has nonzero reward. With key j, terminal reward should be 0.", last_reward=last_reward)
 
@@ -816,6 +820,12 @@ def check_keyboard_reward_semantics(reward: np.ndarray, done: np.ndarray, succes
         bad_d = [int(i) for i in d_like.tolist() if not (done[i] >= 0.5 and success[i] >= 0.5)]
         if bad_d:
             add_warning(warnings, "WARN", "reward_2_not_terminal_success", f"reward=2 should come from key d and should also have done=1, success=1. Bad frames: {bad_d}.", frames=bad_d)
+
+    s_like = np.flatnonzero((np.abs(reward - 3.0) <= tol) | (np.abs(reward - 4.0) <= tol))
+    if s_like.size > 0:
+        bad_s = [int(i) for i in s_like.tolist() if not (done[i] >= 0.5 and success[i] >= 0.5)]
+        if bad_s:
+            add_warning(warnings, "WARN", "stack_reward_not_terminal_success", f"reward=3/4 should come from stacked success key s and should also have done=1, success=1. Bad frames: {bad_s}.", frames=bad_s)
 
     event_rows: list[dict[str, Any]] = []
     event_mask = (np.abs(reward) > 1e-12) | (done >= 0.5) | (success >= 0.5)
@@ -841,6 +851,7 @@ def check_keyboard_reward_semantics(reward: np.ndarray, done: np.ndarray, succes
         "terminal_event_type": terminal_event_type,
         "keyboard_left_stage_events": int(np.sum((np.abs(reward - 1.0) <= tol) & (done < 0.5) & (success < 0.5))),
         "keyboard_right_success_events": int(np.sum((np.abs(reward - 2.0) <= tol) & (done >= 0.5) & (success >= 0.5))),
+        "keyboard_stacked_success_events": int(np.sum(((np.abs(reward - 3.0) <= tol) | (np.abs(reward - 4.0) <= tol)) & (done >= 0.5) & (success >= 0.5))),
         "keyboard_manual_success_events": int(np.sum((np.abs(reward - 1.0) <= tol) & (done >= 0.5) & (success >= 0.5))),
         "keyboard_failure_events": int(np.sum((np.abs(reward) <= tol) & (done >= 0.5) & (success < 0.5))),
     }
@@ -1364,6 +1375,7 @@ def generate_rl_visuals(root: Path, df_ep: pd.DataFrame, info: dict[str, Any], e
         "Keyboard reward rules:",
         " - a: left block placed -> reward += 1, done=0, success=0",
         " - d: right block placed -> reward += 2, done=1, success=1, stop episode",
+        " - s: both blocks placed with right stacked on left -> reward += 3, done=1, success=1, stop episode",
         " - g: manual success -> reward += 1, done=1, success=1, stop episode",
         " - j: manual failure -> reward += 0, done=1, success=0, stop episode",
         "",

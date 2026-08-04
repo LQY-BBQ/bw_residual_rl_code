@@ -3,6 +3,8 @@
 Keys are read from the terminal while the collector is running:
 - a: left block has been placed successfully
 - d: right block has been placed successfully; also ends the episode as success
+- s: both blocks are in the box and the right block is stacked on the left;
+     ends the episode as success with an extra stacking reward
 - g: mark the episode as success and stop recording
 - j: mark the episode as failure and stop recording
 
@@ -38,6 +40,7 @@ class KeyboardRewardMarker:
 
     LEFT_KEY = "a"
     RIGHT_KEY = "d"
+    STACKED_SUCCESS_KEY = "s"
     SUCCESS_KEY = "g"
     FAILURE_KEY = "j"
 
@@ -68,7 +71,8 @@ class KeyboardRewardMarker:
         return (
             "RL keyboard labels: "
             "a=left block done(+1), "
-            "d=right block done(+1) and success stop, "
+            "d=right block done(+2) and success stop, "
+            "s=stacked success stop(+3), "
             "g=success stop(+1), "
             "j=failure stop"
         )
@@ -116,6 +120,21 @@ class KeyboardRewardMarker:
                 decision.success = True
                 decision.stop_reason = "right_block_done_success"
                 print(f"[MARK] frame={frame_index}: success stop, reward += 1")
+                break
+
+            elif key == self.STACKED_SUCCESS_KEY:
+                # Same completion reward as ``d``, plus one point for stacking.
+                self.right_done = True
+                self.right_done_frame = int(frame_index)
+                decision.reward += 3.0
+                decision.done = True
+                decision.success = True
+                decision.stop_reason = "stacked_blocks_success"
+                print(
+                    f"\n[MARK] frame={frame_index}: both blocks placed and right block "
+                    "stacked on left, success stop, reward += 3"
+                )
+                break
 
             elif key == self.SUCCESS_KEY:
                 decision.reward += 1.0
@@ -123,11 +142,13 @@ class KeyboardRewardMarker:
                 decision.success = True
                 decision.stop_reason = "manual_success"
                 print(f"\n[MARK] frame={frame_index}: manual success stop, reward += 1")
+                break
 
             elif key == self.FAILURE_KEY:
                 decision.done = True
                 decision.success = False
                 decision.stop_reason = "manual_failure"
                 print(f"\n[MARK] frame={frame_index}: manual failure stop")
+                break
 
         return decision

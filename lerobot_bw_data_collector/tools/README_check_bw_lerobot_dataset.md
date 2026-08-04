@@ -156,6 +156,7 @@ action.executed ≈ action.act + residual_lambda * action.rl_delta
 ```text
 a：左手物块放置完成，当前帧 reward += 1，done=0，success=0
 d：右手物块放置完成，当前帧 reward += 2，done=1，success=1，并自动停止保存
+s：两块都进入盒子且右块叠在左块上，当前帧 reward += 3，done=1，success=1，并自动停止保存
 g：手动标记成功，当前帧 reward += 1，done=1，success=1，并停止保存
 j：手动标记失败，当前帧 reward += 0，done=1，success=0，并停止保存
 ```
@@ -164,6 +165,7 @@ j：手动标记失败，当前帧 reward += 0，done=1，success=0，并停止�
 
 ```text
 按 a 后再按 d：总 reward = 3，最后一帧 reward = 2，done=1，success=1
+按 a 后再按 s：总 reward = 4，最后一帧 reward = 3，done=1，success=1
 只按 g 成功结束：总 reward = 1，最后一帧 reward = 1，done=1，success=1
 ```
 

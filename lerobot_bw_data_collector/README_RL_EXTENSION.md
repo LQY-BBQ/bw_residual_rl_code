@@ -160,9 +160,14 @@ RL 字段来源和处理：
 ```text
 a: 左块完成，reward += 1，episode 不结束
 d: 右块完成，reward += 2，done=1，success=1，结束 episode
+s: 两块都进入盒子且右块叠在左块上，reward += 3，done=1，success=1，结束 episode
 g: 手动成功，reward += 1，done=1，success=1，结束 episode
 j: 手动失败，reward += 0，done=1，success=0，结束 episode
 ```
+
+正常完成时按 `a` 后再按 `d`，episode 总 reward 为 `3`。堆叠完成时按 `a`
+后再按 `s`，episode 总 reward 为 `4`；`s` 的终止帧奖励 `3` 同时包含右块完成、
+任务成功和堆叠额外奖励。
 
 ## 16 维关节顺序
 

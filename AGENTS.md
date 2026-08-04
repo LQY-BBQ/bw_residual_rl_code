@@ -11,6 +11,8 @@
 3. 先读目标模块的 README、`configs/default.yaml` 或 CLI `--help`，再改实现。
 4. 涉及真实机器人时，先判定任务是离线代码工作、只读诊断、dry-run，还是实际控制。
 5. 只做请求范围内的改动。不要提交数据集、模型权重、缓存、日志或 ROS 运行产物。
+6. 如果没有要求修改代码，就先不要修改代码，只有在用户告诉，进行修改的时候再改
+7. `docs/PROJECT_CONTEXT.md`的最后一栏是项目进展，所有对话如果涉及到项目的实验、代码修改等相关进展，必须在`docs/PROJECT_CONTEXT.md`文档的最后一栏更新
 
 ## 项目目标与目录
 
@@ -24,6 +26,9 @@ Residual BC、采集 rollout、训练 Offline Residual SAC/CQL，并部署 ACT +
 | `lerobot_bw_rl/` | ACT 视觉缓存、Residual BC、Offline Residual SAC/CQL 训练及奖励检查 | `scripts/build_visual_cache.sh`、`scripts/train_bc.sh`、`scripts/train_sac.sh` |
 
 完整操作顺序和示例参数见 `BW训练全流程操作手册.md`。模块细节分别见三个子项目的 README。
+
+机器人的ROS控制系统的代码，在主目录下的：~/bw_teleoperate_ws，这个目录下有本课题的基本思路文档，以及接口文档，这些文档必要时需要读取。
+机器人采集的数据在：~/robot_datasets，这里包含了采集的数据，必要是可以读取。
 
 ## 运行环境
 

@@ -85,6 +85,15 @@ def test_residual_confirmation_confidence_keep_base_and_minimum_hold() -> None:
     np.testing.assert_allclose(released.final_action, [0.0, 0.8])
 
 
+def test_reset_seeds_human_gripper_state_and_hold_time() -> None:
+    controller = BinaryGripperController(_config(act_confirm_frames=1, min_hold_s=0.3))
+    controller.reset(np.asarray([0.0, 0.8], dtype=np.float32), now_s=1.0)
+    held = controller.step([0.8, 0.0], [0, 0], [1.0, 1.0], now_s=1.1)
+    np.testing.assert_allclose(held.final_action, [0.0, 0.8])
+    released = controller.step([0.8, 0.0], [0, 0], [1.0, 1.0], now_s=1.31)
+    np.testing.assert_allclose(released.final_action, [0.8, 0.0])
+
+
 def test_cli_hysteresis_flags_are_mutually_exclusive() -> None:
     assert parse_args(["--gripper-hysteresis"]).gripper_hysteresis is True
     assert parse_args(["--no-gripper-hysteresis"]).gripper_hysteresis is False

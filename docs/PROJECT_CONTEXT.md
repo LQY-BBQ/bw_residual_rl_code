@@ -1,6 +1,6 @@
 # BW Residual RL 项目上下文
 
-更新时间：2026-08-04
+更新时间：2026-08-05
 
 本文描述当前仓库的稳定架构和跨模块合同，供开发者与自动化代理快速建立共同上下文。它不是一次训练
 实验记录，也不替代完整操作手册。修改代码前还应阅读根目录 `AGENTS.md` 和目标模块 README。
@@ -56,6 +56,7 @@ ACT rollout + 人工接管 -> RL correction 数据 -> Residual BC
 - `src/.../residual_policy.py`：加载 format v4 residual checkpoint 并校验绑定关系。
 - `src/.../action_utils.py`：residual 组合、clamp、平滑和 ROS `JointState` 转换。
 - `src/.../gripper_control.py`：ACT 夹爪迟滞与 residual 三分类控制。
+- `src/.../handover_control.py`：人工接管期间的 Policy shadow 缓存与无冲击恢复状态机。
 - `src/.../visualization/`：只读动作可视化。
 
 ### `lerobot_bw_rl`
@@ -159,6 +160,7 @@ action_composed_arm = action_act_arm + residual_lambda * delta_joint_arm
 | --- | --- |
 | 关节反馈 | `/{robot_sn}/joint_states_fdb` |
 | 控制源 | `/{robot_sn}/Teleop/control_source` |
+| 人工夹爪交接输入（不进入模型） | `/{robot_sn}/Teleop/gripper_pos` |
 | 三路图像 | 见相机合同 |
 
 ### Runner 控制输出
@@ -175,7 +177,7 @@ action_composed_arm = action_act_arm + residual_lambda * delta_joint_arm
 | ACT 完整动作 | `/{robot_sn}/Policy/debug/action_act` |
 | joint-space residual | `/{robot_sn}/Policy/debug/action_rl_delta` |
 | residual 组合且应用夹爪候选后的动作 | `/{robot_sn}/Policy/debug/action_composed` |
-| 实际最终策略动作 | `/{robot_sn}/Policy/debug/action_final` |
+| 实际发布到 Policy 控制入口的最终动作 | `/{robot_sn}/Policy/debug/action_final` |
 | 左右夹爪原始 residual 类别 | `/{robot_sn}/Policy/debug/gripper_residual_class` |
 
 debug topic 用于采集和观测，不应由机器人下位机直接执行。runner 的 `--dry-run` 不发布控制和 debug
@@ -187,6 +189,16 @@ debug topic 用于采集和观测，不应由机器人下位机直接执行。ru
 - `/{robot_sn}/Teleop/gripper_pos`
 
 `control_source=0` 表示 REMOTE/人工控制，`control_source=1` 表示 INFERENCE/策略控制。
+
+Runner 只有收到合法 `control_source` 才允许发布完整 Policy 控制。REMOTE 期间模型继续推理并发布
+ACT/residual/composed 诊断，手臂最终缓存则跟随 14 维反馈；Teleop 夹爪只同步交接安全缓存，不进入
+模型。切回 INFERENCE 时清空 ACT temporal ensemble 和后处理历史，保持 6 个有效帧，再以
+`0.15 rad/s`、单步 `0.005 rad@30Hz` 且命令-反馈不超过 `0.03 rad` 的限制恢复。连续 3 帧距目标不超过
+`0.01 rad` 后恢复正常状态。缺少近期合法 Teleop 夹爪时仍保留模型诊断，但不发布控制或
+`debug/action_final`。
+
+下游 `bw_serial` 在 REMOTE→INFERENCE 切换点另设时间戳门控：切换前的 Policy 缓存全部拒绝，只有切换
+后新产生的手臂和夹爪消息同时到达才完成交接；等待期间保持最后实际使用的 Teleop 命令。
 
 ## 7. 推理模式
 
@@ -344,3 +356,41 @@ cd ../lerobot_bw_rl
 重新部署测试，中间机器人经过了位移，摄像头可能也有点歪了，我稍微调整了一下，但是这次的效果还是很差。
 主要表现在夹爪有时候不知道要闭合，然后左手放完了物块，就会卡住，右手就不知道要拿物块了，呆呆的。
 我不知道目前应该怎么办，我本来打算，今天进行残差BC的训练，但是，目前原模型的效果不太行。我要解决这个问题还是咋办。
+
+2026.8.5
+目前发现之前部署的时候效果不好的原因了。是因为机器人的夹爪被换掉了。他的颜色发生了变化。这个是导致效果变差的主要原因。
+目前我准备进行残差数据采集，但是我发现，目前有时候方块放在桌子上，一些角度下，机械臂抓取会稍微偏离方块，当方块处于夹爪内部时候，
+机械臂会把方块先移动到某个位置，然后再抓取。我觉得可能是因为机器人的位置偏移，导致他抓取这个位置的方块的时候，和采集的数据有偏移，
+方块在夹爪里面的位置和采集的数据不匹配，然后，所以他无法识别这个情况，就移动夹爪，直到和常见位置类似，然后才夹取方块。
+针对这种情况，我如果切换到人工操控，调整夹爪位置，在切换回去的时候，手臂会立刻产生巨大偏移，因为策略话题保存输出位置与此刻位置偏差大，
+所以切换的时候，机械臂会忽然产生巨大移动，这样会破坏之前的状态，还是无法让手臂更好的抓取物块。目前我不知道应该怎么做。我觉得可以采取办法，让
+切换回去策略控制的时候，不会有巨大动作。
+
+2026.8.5（人工接管安全交接实现）
+已在 policy runner 增加 `REMOTE_SHADOW -> INITIAL_HOLD -> RESUMING -> INFERENCE` 状态机。人工期间手臂
+Policy 缓存跟随反馈，恢复时重置 ACT temporal ensemble，保持 6 帧并按 `0.15 rad/s`、`0.03 rad`
+跟踪误差上限平滑接管；Teleop 夹爪仅用于交接，缺失或非法不影响模型推理但阻止完整控制发布。
+`bw_serial` 同步增加切换后新 Policy 手臂/夹爪双流门控，避免旧缓存重放和半切换。当前仅完成离线
+单元测试与隔离构建，尚未进行真实机器人切换验证；实机前仍需先执行输入检查和 30 步 dry-run。
+
+2026.8.5（数据检查手册更新）
+Residual BC 纠正数据检查流程改为直接调用 `check_dataset.sh` 检查指定的单个数据集，不再在手册中使用
+批量检查脚本；当前示例检查 `act_correction_001` 的全部 episode，并输出到其独立可视化目录。
+
+2026.8.5（27 组 Residual BC 纠正数据检查）
+已离线检查 `act_correction_001` 至 `027`，共 47,114 帧、约 26.16 分钟。27 组 dataset checker
+均无 `ERROR`，strict reward 检查均通过；16 维动作、相机 v3、parquet/视频帧数、接管动作、夹爪端点和
+reward/done/success 合同一致，81 个视频均可完整解码。总接管 8,366 帧，其中策略开始后的实际纠正为
+7,594 帧、84 段。`act_correction_027` 只有开头 0-12 帧处于人工控制，策略运行后没有纠正，应人工确认
+它是有意保留的零 residual 成功样本，还是应排除/补采。全部数据均缺少 residual lambda 元数据，检查器
+按默认 0.2 解读，训练前仍需确认实际 lambda；timing 告警只出现在每组开头 3-5 个 REMOTE 帧，未影响
+Policy 控制帧。检查结果位于 `~/robot_datasets/pick_block_to_box/Res_BC_Data_viz/`。检查器现有的 14 维
+手臂 target/16 维绘图索引问题仅用进程内适配绕过，本次未修改仓库源码或输入数据。
+
+2026.8.5（本批 Residual BC 训练预检与命令校准）
+合并 dry-run 已确认 `act_correction_*` 共 27 episodes、47,114 frames。按训练器的夹爪标签算法统计，
+左开/左关、右开/右关独立事件分别为 `11/17`、`18/23`，未达到每类至少 20 次的硬门槛，因此本批尚未
+启动训练，最低还需补采左开 9、左关 3、右开 2 个独立事件，推荐四类均补到 25 次。操作手册第六节已
+改为当前 `Res_BC_Data` 的 dry-run、正式合并和训练命令，固定绑定 ACT `050000` checkpoint，并根据
+本批纠正幅度使用 `residual_lambda=1.0`、手臂 limit `0.20`；训练先运行 20,000 steps 并每 2,000 steps
+检查验证集。format v4 夹爪为离散三分类，命令中不再使用已废弃的连续夹爪 residual limit。

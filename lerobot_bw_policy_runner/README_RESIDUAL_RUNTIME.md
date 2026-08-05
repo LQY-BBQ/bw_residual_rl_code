@@ -99,13 +99,13 @@ ACT三路投影视觉特征
 夹爪 = ACT 二值基础状态 + Residual BC 三分类覆盖（左右各 3 类）
 ```
 
-四个调试话题的含义：
+五个调试话题的含义：
 
 ```text
 action_act       = ACT 输出
 action_rl_delta  = 16 维，其中夹爪索引 7/15 固定为 0
 action_composed  = 14 维手臂合成结果 + 夹爪候选二值状态
-action_final     = 手臂经过 clamp/smoothing，夹爪经过确认/保持后的最终命令
+action_final     = 实际发布到 Policy 控制入口的最终命令
 gripper_residual_class = 左右夹爪原始分类，0=KEEP_BASE、1=FORCE_OPEN、2=FORCE_CLOSE
 ```
 
@@ -114,7 +114,48 @@ gripper_residual_class = 左右夹爪原始分类，0=KEEP_BASE、1=FORCE_OPEN�
 可切为单阈值 `0.45`，仍保留连续帧确认。命令行显式值优先于 YAML。Residual 覆盖也需要
 连续 3 帧同类且置信度至少 `0.70`，最终状态切换后保持至少 `0.30s`。
 
-## 3. 只运行 ACT
+## 3. 人工接管后的无冲击恢复
+
+Runner 始终把 `Teleop/control_source` 当作发布安全门控，而不是模型输入。三路相机仍正常提供唯一新帧时，
+人工控制期间会继续运行 ACT/residual；模型输出仍可从 `action_act`、`action_rl_delta` 和
+`action_composed` 诊断，但手臂 Policy 缓存跟随实时关节反馈，不追随模型目标。
+
+交接状态依次为：
+
+```text
+REMOTE_SHADOW -> INITIAL_HOLD -> RESUMING -> INFERENCE
+```
+
+- 缺失或非法 `control_source` 时继续计算模型诊断，但不发布手臂、夹爪或 `action_final`。
+- `REMOTE -> INFERENCE` 每次只重置一次 ACT temporal ensemble、动作平滑器和夹爪确认状态。
+- 前 6 个有效控制帧保持人工纠正后的手臂姿态；之后按 `0.15 rad/s` 恢复，即 30 Hz 下每步最多
+  `0.005 rad`，且命令领先反馈不超过 `0.03 rad`。
+- 命令连续 3 帧距当前模型目标不超过 `0.01 rad` 后进入正常 `INFERENCE`。
+- 夹爪保持最后的人工二值状态至少 `0.30s`，再接受原有连续 3 帧确认后的策略状态。
+- `Teleop/gripper_pos` 只用于人工到策略的夹爪交接，不进入 ACT/residual，也不是正常策略推理的依赖。
+  交接时没有近期合法的 `0.0/0.8` 双夹爪命令，Runner 继续输出模型诊断，但不发布完整控制组合。
+  “近期”沿用 `camera_stream.max_frame_age_s`，默认是 `0.15s`。
+
+默认配置为：
+
+```yaml
+robot:
+  input_topics:
+    teleop_gripper_action: /{robot_sn}/Teleop/gripper_pos
+inference:
+  handover:
+    initial_hold_frames: 6
+    resume_max_velocity: 0.15
+    max_command_tracking_error: 0.03
+    completion_tolerance: 0.01
+    completion_frames: 3
+```
+
+`bw_serial` 还会在切换点设置第二道门控：只接受切换后带新时间戳的 Policy 手臂与夹爪消息，并在两者
+同时就绪后才完成交接。任一输入缺失时，底层继续保持最后实际使用的 Teleop 目标，不重放旧 Policy
+缓存。相机停帧仍会停止本轮推理和全部动作发布，不能关闭新帧门控来绕过。
+
+## 4. 只运行 ACT
 
 ```bash
 cd ~/mycode/bw_residual_rl_code/lerobot_bw_policy_runner
@@ -127,7 +168,7 @@ cd ~/mycode/bw_residual_rl_code/lerobot_bw_policy_runner
   --fps 30
 ```
 
-## 4. ACT + Residual BC
+## 5. ACT + Residual BC
 
 ```bash
 ./scripts/run_infer.sh \
@@ -139,7 +180,7 @@ cd ~/mycode/bw_residual_rl_code/lerobot_bw_policy_runner
   --fps 30
 ```
 
-## 5. ACT + Residual RL
+## 6. ACT + Residual RL
 
 ```bash
 ./scripts/run_infer.sh \
@@ -163,7 +204,7 @@ ACT fingerprint
 
 只有显式传入 `--residual-lambda` 时，才覆盖 checkpoint 中的 lambda。Residual limits 始终使用 checkpoint 中保存的训练值，防止训练和部署不一致。
 
-## 6. 安全检查
+## 7. 安全检查
 
 部署只接受 format v4 hybrid checkpoint；旧的连续夹爪 residual checkpoint 不会自动转换。
 
@@ -181,7 +222,7 @@ Residual 模式启动时会检查：
 
 不一致时程序会直接停止，不会带着错误模型控制机器人。
 
-## 7. 实时动作可视化
+## 8. 实时动作可视化
 
 可视化是独立 ROS2 进程，只订阅四个调试话题，不加载策略模型、不占用 GPU，也不会发布机器人控制命令。
 

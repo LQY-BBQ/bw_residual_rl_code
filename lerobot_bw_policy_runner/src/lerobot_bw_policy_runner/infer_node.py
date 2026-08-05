@@ -37,6 +37,7 @@ from .constants import (
     JOINT_NAMES,
 )
 from .gripper_control import BinaryGripperController
+from .handover_control import PolicyHandoverController
 from .policy_loader import (
     infer_action,
     infer_action_with_shared_visual_feature,
@@ -201,6 +202,13 @@ def main(argv: list[str] | None = None) -> int:
     step_count = 0
     filter_state = ActionFilterState()
     gripper_controller = BinaryGripperController(config.inference.gripper)
+    handover_controller = PolicyHandoverController(
+        config.inference.handover,
+        fps=config.inference.fps,
+        gripper_hold_s=config.inference.gripper.min_hold_s,
+    )
+    last_handover_phase = handover_controller.phase
+    last_handover_block_reason: str | None = None
 
     try:
         print("[1/4] Loading frozen ACT policy...")
@@ -337,6 +345,15 @@ def main(argv: list[str] | None = None) -> int:
             f"residual_confirm_frames={gripper_config.residual_confirm_frames} "
             f"min_hold_s={gripper_config.min_hold_s:g}"
         )
+        handover_config = config.inference.handover
+        print(
+            "Control handover: "
+            f"hold_frames={handover_config.initial_hold_frames} "
+            f"resume_max_velocity={handover_config.resume_max_velocity:g}rad/s "
+            f"tracking_error={handover_config.max_command_tracking_error:g}rad "
+            f"completion={handover_config.completion_tolerance:g}rad/"
+            f"{handover_config.completion_frames}frames"
+        )
         if config.inference.dry_run:
             print("Dry-run enabled: no output/debug messages are published.")
 
@@ -381,6 +398,25 @@ def main(argv: list[str] | None = None) -> int:
             next_time += (skipped_deadlines + 1) * target_dt
 
             try:
+                reset_policy_history = handover_controller.observe_control_source(
+                    sample.control_source,
+                    sample.observation_state,
+                    sample.teleop_gripper_action,
+                )
+                if reset_policy_history:
+                    if hasattr(act_bundle.policy, "reset"):
+                        act_bundle.policy.reset()
+                    filter_state.previous_action = sample.observation_state.astype(
+                        np.float32, copy=True
+                    )
+                    gripper_controller.reset(
+                        handover_controller.handover_gripper,
+                        now_s=sample_time,
+                    )
+                    reader.get_logger().info(
+                        "Policy control entry detected: reset ACT temporal history, "
+                        "action smoothing, and gripper confirmation state."
+                    )
                 observation = sample.to_lerobot_observation()
                 if residual_bundle is None:
                     raw_act = infer_action(
@@ -442,6 +478,12 @@ def main(argv: list[str] | None = None) -> int:
                 action_composed_debug = action_final_raw.copy()
                 action_composed_debug[GRIPPER_JOINT_INDICES] = gripper_result.candidate_action
                 action_final[GRIPPER_JOINT_INDICES] = gripper_result.final_action
+                handover_result = handover_controller.apply(
+                    action_final,
+                    sample.observation_state,
+                    sample.teleop_gripper_action,
+                )
+                action_final = handover_result.command
                 filter_state.previous_action = action_final.astype(np.float32, copy=True)
                 stamp = reader.get_clock().now().to_msg()
                 arm_msg, gripper_msg = split_action_to_joint_states(
@@ -454,7 +496,12 @@ def main(argv: list[str] | None = None) -> int:
                 debug_delta = vector_to_joint_state(delta_joint, stamp=stamp)
                 debug_composed = vector_to_joint_state(action_composed_debug, stamp=stamp)
                 debug_final = vector_to_joint_state(action_final, stamp=stamp)
-                reader.publish_action(arm_msg, gripper_msg, dry_run=config.inference.dry_run)
+                suppress_publication = not handover_result.publish_control
+                reader.publish_action(
+                    arm_msg,
+                    gripper_msg,
+                    dry_run=config.inference.dry_run or suppress_publication,
+                )
                 reader.publish_debug_actions(
                     debug_act,
                     debug_delta,
@@ -462,6 +509,7 @@ def main(argv: list[str] | None = None) -> int:
                     debug_final,
                     gripper_result.raw_classes,
                     dry_run=config.inference.dry_run,
+                    publish_final=not suppress_publication,
                 )
                 csv_logger.write(
                     step=step_count,
@@ -469,10 +517,33 @@ def main(argv: list[str] | None = None) -> int:
                     action_act=action_act,
                     delta=delta_joint,
                     action_final=action_final,
+                    handover_phase=handover_result.phase.value,
+                    handover_publish_control=handover_result.publish_control,
+                    handover_target_error_max=handover_result.target_error_max,
+                    handover_command_feedback_error_max=(
+                        handover_result.command_feedback_error_max
+                    ),
                     gripper_classes=gripper_result.raw_classes,
                     gripper_confidences=gripper_result.confidences,
                     gripper_hysteresis_enabled=config.inference.gripper.hysteresis.enabled,
                 )
+                if handover_result.phase != last_handover_phase:
+                    reader.get_logger().info(
+                        "Policy handover phase changed: "
+                        f"{last_handover_phase.value} -> {handover_result.phase.value}; "
+                        f"target_error_max={handover_result.target_error_max:.5f} "
+                        "command_feedback_error_max="
+                        f"{handover_result.command_feedback_error_max:.5f}"
+                    )
+                    last_handover_phase = handover_result.phase
+                if suppress_publication and handover_result.reason != last_handover_block_reason:
+                    reader.get_logger().error(
+                        "Policy control publication blocked by handover safety: "
+                        f"{handover_result.reason or 'unspecified reason'}"
+                    )
+                    last_handover_block_reason = handover_result.reason
+                elif not suppress_publication:
+                    last_handover_block_reason = None
                 step_count += 1
 
                 if config.inference.log_every_n_steps > 0 and step_count % config.inference.log_every_n_steps == 0:
@@ -482,6 +553,9 @@ def main(argv: list[str] | None = None) -> int:
                     log_message = (
                         f"step={step_count} recent_hz={recent_hz:.1f} mode={config.inference.mode} "
                         f"missed_deadlines={missed_deadlines} camera_wait_cycles={camera_wait_cycles} "
+                        f"handover={handover_result.phase.value} "
+                        f"handover_target_error={handover_result.target_error_max:.5f} "
+                        f"command_feedback_error={handover_result.command_feedback_error_max:.5f} "
                         f"delta_abs_max={float(np.max(np.abs(delta_joint))):.5f} "
                         f"left_gripper={float(action_final[JOINT_NAMES.index('left_gripper_joint')]):.6f} "
                         f"right_gripper={float(action_final[JOINT_NAMES.index('right_gripper_joint')]):.6f}"

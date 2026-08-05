@@ -14,8 +14,8 @@ set -uo pipefail
 # 可以先指定：
 #   export LEROBOT_BW_COLLECTOR_ROOT=~/mycode/你的路径/lerobot_bw_data_collector
 
-INPUT_ROOT="${1:-${HOME}/robot_datasets/bw_rl_corrections}"
-OUTPUT_ROOT="${2:-${HOME}/robot_datasets/bw_rl_corrections_viz}"
+INPUT_ROOT="${1:-${HOME}/robot_datasets/pick_block_to_box/Res_BC_Data}"
+OUTPUT_ROOT="${2:-${HOME}/robot_datasets/pick_block_to_box/Res_BC_Data_viz}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOCAL_PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." 2>/dev/null && pwd || true)"

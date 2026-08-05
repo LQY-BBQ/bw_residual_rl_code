@@ -14,9 +14,9 @@ from std_msgs.msg import Int32, Int8MultiArray
 
 from .camera_stream import CameraStreamStatus, CameraStreamTracker
 from .config import AppConfig
-from .constants import IMAGE_KEY_PREFIX, OBS_STATE_KEY
+from .constants import GRIPPER_JOINT_NAMES, IMAGE_KEY_PREFIX, OBS_STATE_KEY
 from .image_utils import ImageConversionError, ros_image_to_rgb
-from .joint_mapping import joint_dict_to_vector, state_from_joint_state
+from .joint_mapping import extract_named_positions, joint_dict_to_vector, state_from_joint_state
 
 
 @dataclass(slots=True)
@@ -36,6 +36,7 @@ class ObservationSample:
     observation_state: np.ndarray
     images: dict[str, np.ndarray]
     control_source: int | None = None
+    teleop_gripper_action: np.ndarray | None = None
     image_sources: dict[str, ImageSourceInfo] = field(default_factory=dict)
 
     def to_lerobot_observation(self) -> dict[str, np.ndarray]:
@@ -52,6 +53,8 @@ class BWObservationReader(Node):
         self._lock = threading.Lock()
         self._latest_state: JointState | None = None
         self._latest_control_source: Int32 | None = None
+        self._latest_teleop_gripper_action: JointState | None = None
+        self._latest_teleop_gripper_received_monotonic: float | None = None
         self._latest_images: dict[str, Image] = {}
         self._camera_tracker = CameraStreamTracker(list(config.robot.input_topics.cameras))
         self._consumed_image_sequences = {
@@ -65,6 +68,13 @@ class BWObservationReader(Node):
         self.create_subscription(JointState, config.robot.input_topics.state, self._on_state, joint_qos)
         if config.robot.input_topics.control_source:
             self.create_subscription(Int32, config.robot.input_topics.control_source, self._on_control_source, joint_qos)
+        if config.robot.input_topics.teleop_gripper_action:
+            self.create_subscription(
+                JointState,
+                config.robot.input_topics.teleop_gripper_action,
+                self._on_teleop_gripper_action,
+                joint_qos,
+            )
         for camera_name, topic in config.robot.input_topics.cameras.items():
             self.create_subscription(Image, topic, self._make_image_callback(camera_name), image_qos)
 
@@ -81,6 +91,10 @@ class BWObservationReader(Node):
         self.get_logger().info(f"Subscribed state: {config.robot.input_topics.state}")
         if config.robot.input_topics.control_source:
             self.get_logger().info(f"Subscribed control_source: {config.robot.input_topics.control_source}")
+        if config.robot.input_topics.teleop_gripper_action:
+            self.get_logger().info(
+                f"Subscribed Teleop gripper: {config.robot.input_topics.teleop_gripper_action}"
+            )
         for camera_name, topic in config.robot.input_topics.cameras.items():
             self.get_logger().info(f"Subscribed camera {camera_name}: {topic}")
         self.get_logger().info(f"Policy arm output:     {config.robot.output_topics.arm_action}")
@@ -100,6 +114,11 @@ class BWObservationReader(Node):
     def _on_control_source(self, msg: Int32) -> None:
         with self._lock:
             self._latest_control_source = msg
+
+    def _on_teleop_gripper_action(self, msg: JointState) -> None:
+        with self._lock:
+            self._latest_teleop_gripper_action = msg
+            self._latest_teleop_gripper_received_monotonic = time.monotonic()
 
     def _make_image_callback(self, camera_name: str):
         def _callback(msg: Image) -> None:
@@ -204,6 +223,10 @@ class BWObservationReader(Node):
         with self._lock:
             state_msg = self._latest_state
             control_msg = self._latest_control_source
+            teleop_gripper_msg = self._latest_teleop_gripper_action
+            teleop_gripper_received_monotonic = (
+                self._latest_teleop_gripper_received_monotonic
+            )
             image_msgs = dict(self._latest_images)
             image_sequences = self._camera_tracker.sequences()
             image_received_times = self._camera_tracker.received_times()
@@ -237,6 +260,30 @@ class BWObservationReader(Node):
             return None
         try:
             state_dict = state_from_joint_state(state_msg, source_label=f"state:{self.config.robot.input_topics.state}")
+            teleop_gripper_action = None
+            teleop_gripper_is_recent = (
+                teleop_gripper_received_monotonic is not None
+                and now - teleop_gripper_received_monotonic <= float(max_image_age_s)
+            )
+            if teleop_gripper_msg is not None and teleop_gripper_is_recent:
+                try:
+                    teleop_gripper_values = extract_named_positions(
+                        teleop_gripper_msg,
+                        GRIPPER_JOINT_NAMES,
+                        source_label=(
+                            "Teleop gripper:"
+                            f"{self.config.robot.input_topics.teleop_gripper_action}"
+                        ),
+                    )
+                    teleop_gripper_action = np.asarray(
+                        [teleop_gripper_values[name] for name in GRIPPER_JOINT_NAMES],
+                        dtype=np.float32,
+                    )
+                except Exception as exc:
+                    self.get_logger().warning(
+                        "Ignoring invalid Teleop gripper handover input; "
+                        f"policy inference remains available: {exc}"
+                    )
             images: dict[str, np.ndarray] = {}
             image_sources: dict[str, ImageSourceInfo] = {}
             for camera_name in self.config.robot.input_topics.cameras:
@@ -292,6 +339,7 @@ class BWObservationReader(Node):
             observation_state=joint_dict_to_vector(state_dict),
             images=images,
             control_source=control_source,
+            teleop_gripper_action=teleop_gripper_action,
             image_sources=image_sources,
         )
 
@@ -310,6 +358,7 @@ class BWObservationReader(Node):
         gripper_classes: np.ndarray,
         *,
         dry_run: bool = False,
+        publish_final: bool = True,
     ) -> None:
         # Debug topics are safe: they are not consumed by mantis_comm_node as control inputs.
         if dry_run:
@@ -317,7 +366,8 @@ class BWObservationReader(Node):
         self.debug_act_publisher.publish(act_msg)
         self.debug_delta_publisher.publish(delta_msg)
         self.debug_composed_publisher.publish(composed_msg)
-        self.debug_final_publisher.publish(final_msg)
+        if publish_final:
+            self.debug_final_publisher.publish(final_msg)
         class_msg = Int8MultiArray()
         class_msg.data = [int(value) for value in np.asarray(gripper_classes).reshape(2)]
         self.debug_gripper_class_publisher.publish(class_msg)

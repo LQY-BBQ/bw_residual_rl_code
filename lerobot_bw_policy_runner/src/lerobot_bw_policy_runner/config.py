@@ -21,6 +21,7 @@ class InputTopics:
     state: str
     cameras: dict[str, str]
     control_source: str | None = None
+    teleop_gripper_action: str | None = None
 
 
 @dataclass(slots=True)
@@ -93,6 +94,15 @@ class GripperControlConfig:
 
 
 @dataclass(slots=True)
+class HandoverConfig:
+    initial_hold_frames: int = 6
+    resume_max_velocity: float = 0.15
+    max_command_tracking_error: float = 0.03
+    completion_tolerance: float = 0.01
+    completion_frames: int = 3
+
+
+@dataclass(slots=True)
 class ResidualConfig:
     policy_path: Path | None = None
     lambda_: float | None = None
@@ -122,6 +132,7 @@ class InferenceConfig:
     log_dir: Path | None = None
     camera_stream: CameraStreamConfig | None = None
     gripper: GripperControlConfig = field(default_factory=GripperControlConfig)
+    handover: HandoverConfig = field(default_factory=HandoverConfig)
 
 
 @dataclass(slots=True)
@@ -202,6 +213,7 @@ def load_config(config_path: str | Path, *, robot_sn: str | None = None, policy_
     raw_camera_stream = raw_inference.get("camera_stream", {}) or {}
     raw_gripper = raw_inference.get("gripper", {}) or {}
     raw_gripper_hysteresis = raw_gripper.get("hysteresis", {}) or {}
+    raw_handover = raw_inference.get("handover", {}) or {}
 
     final_robot_sn = str(robot_sn or raw_robot.get("robot_sn") or "").strip()
     if not final_robot_sn or final_robot_sn == "BW_XXXXXXX":
@@ -333,6 +345,24 @@ def load_config(config_path: str | Path, *, robot_sn: str | None = None, policy_
         raise ValueError("inference.gripper.residual_confirm_frames must be at least 1")
     if gripper_config.min_hold_s < 0:
         raise ValueError("inference.gripper.min_hold_s must be non-negative")
+    handover_config = HandoverConfig(
+        initial_hold_frames=int(raw_handover.get("initial_hold_frames", 6)),
+        resume_max_velocity=float(raw_handover.get("resume_max_velocity", 0.15)),
+        max_command_tracking_error=float(raw_handover.get("max_command_tracking_error", 0.03)),
+        completion_tolerance=float(raw_handover.get("completion_tolerance", 0.01)),
+        completion_frames=int(raw_handover.get("completion_frames", 3)),
+    )
+    handover_numeric = (
+        handover_config.resume_max_velocity,
+        handover_config.max_command_tracking_error,
+        handover_config.completion_tolerance,
+    )
+    if not all(math.isfinite(value) and value > 0.0 for value in handover_numeric):
+        raise ValueError("inference.handover velocity/error/tolerance values must be finite and positive")
+    if handover_config.initial_hold_frames < 1:
+        raise ValueError("inference.handover.initial_hold_frames must be at least 1")
+    if handover_config.completion_frames < 1:
+        raise ValueError("inference.handover.completion_frames must be at least 1")
     residual_cfg = ResidualConfig(
         policy_path=final_residual_path,
         lambda_=(
@@ -343,6 +373,15 @@ def load_config(config_path: str | Path, *, robot_sn: str | None = None, policy_
         deterministic=_as_bool(raw_residual.get("deterministic", True)),
         limits=_residual_limits(raw_residual.get("limits")),
     )
+    raw_teleop_gripper_topic = raw_input_topics.get(
+        "teleop_gripper_action",
+        f"/{final_robot_sn}/Teleop/gripper_pos",
+    )
+    teleop_gripper_topic = (
+        None
+        if raw_teleop_gripper_topic is None
+        else _expand_robot_sn(str(raw_teleop_gripper_topic), final_robot_sn)
+    )
     return AppConfig(
         ros=RosConfig(domain_id=int(raw_ros.get("domain_id", 0))),
         robot=RobotConfig(
@@ -351,6 +390,7 @@ def load_config(config_path: str | Path, *, robot_sn: str | None = None, policy_
                 state=_expand_robot_sn(raw_input_topics["state"], final_robot_sn),
                 cameras=camera_topics,
                 control_source=_expand_robot_sn(raw_input_topics.get("control_source", f"/{final_robot_sn}/Teleop/control_source"), final_robot_sn),
+                teleop_gripper_action=teleop_gripper_topic,
             ),
             output_topics=OutputTopics(
                 arm_action=_expand_robot_sn(raw_output_topics["arm_action"], final_robot_sn),
@@ -396,6 +436,7 @@ def load_config(config_path: str | Path, *, robot_sn: str | None = None, policy_
                 require_new_frames=_as_bool(raw_camera_stream.get("require_new_frames", True)),
             ),
             gripper=gripper_config,
+            handover=handover_config,
         ),
     )
 

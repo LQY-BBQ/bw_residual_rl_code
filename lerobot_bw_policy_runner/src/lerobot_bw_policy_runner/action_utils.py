@@ -148,6 +148,10 @@ class ActionCSVLogger:
                 fieldnames.extend(f"{prefix}.{name}" for name in JOINT_NAMES)
             fieldnames.extend(
                 [
+                    "handover_phase",
+                    "handover_publish_control",
+                    "handover_target_error_max",
+                    "handover_command_feedback_error_max",
                     "gripper_class.left",
                     "gripper_class.right",
                     "gripper_confidence.left",
@@ -167,13 +171,17 @@ class ActionCSVLogger:
             self._writer = csv.DictWriter(self._file, fieldnames=fieldnames)
             self._writer.writeheader()
 
-    def write(self, *, step: int, control_source: int | None, action_act: np.ndarray, delta: np.ndarray, action_final: np.ndarray, gripper_classes: np.ndarray | None = None, gripper_confidences: np.ndarray | None = None, gripper_hysteresis_enabled: bool | None = None) -> None:
+    def write(self, *, step: int, control_source: int | None, action_act: np.ndarray, delta: np.ndarray, action_final: np.ndarray, handover_phase: str = "INFERENCE", handover_publish_control: bool = True, handover_target_error_max: float = 0.0, handover_command_feedback_error_max: float = 0.0, gripper_classes: np.ndarray | None = None, gripper_confidences: np.ndarray | None = None, gripper_hysteresis_enabled: bool | None = None) -> None:
         if self._writer is None:
             return
         row = {"step": step, "control_source": -1 if control_source is None else int(control_source)}
         for prefix, values in [("act", action_act), ("delta", delta), ("final", action_final)]:
             for name, value in zip(JOINT_NAMES, np.asarray(values).reshape(len(JOINT_NAMES))):
                 row[f"{prefix}.{name}"] = float(value)
+        row["handover_phase"] = str(handover_phase)
+        row["handover_publish_control"] = int(bool(handover_publish_control))
+        row["handover_target_error_max"] = float(handover_target_error_max)
+        row["handover_command_feedback_error_max"] = float(handover_command_feedback_error_max)
         classes = np.zeros(2, dtype=np.int64) if gripper_classes is None else np.asarray(gripper_classes).reshape(2)
         confidences = np.ones(2, dtype=np.float32) if gripper_confidences is None else np.asarray(gripper_confidences).reshape(2)
         row["gripper_class.left"], row["gripper_class.right"] = (int(v) for v in classes)

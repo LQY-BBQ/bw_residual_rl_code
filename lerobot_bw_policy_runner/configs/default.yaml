@@ -10,6 +10,9 @@ robot:
   input_topics:
     state: /{robot_sn}/joint_states_fdb
     control_source: /{robot_sn}/Teleop/control_source
+    # Used only to keep the inactive Policy gripper cache continuous during
+    # REMOTE control and to seed a safe REMOTE -> INFERENCE handover.
+    teleop_gripper_action: /{robot_sn}/Teleop/gripper_pos
     cameras:
       env_cam: /camera/env_d435/color/image_raw
       left_wrist_cam: /camera/left_d405/color/image_raw
@@ -54,6 +57,15 @@ inference:
       open_threshold: 0.50
       close_threshold: 0.40
       single_threshold: 0.45
+
+  handover:
+    # Hold the corrected pose for six fresh 30 Hz observations, then recover
+    # toward the newly reset policy without letting commands outrun feedback.
+    initial_hold_frames: 6
+    resume_max_velocity: 0.15
+    max_command_tracking_error: 0.03
+    completion_tolerance: 0.01
+    completion_frames: 3
 
   # Current mantis_camera_ros contract. Every inference step consumes a unique
   # frame from all three 30 FPS streams; the runner converts sources to RGB.

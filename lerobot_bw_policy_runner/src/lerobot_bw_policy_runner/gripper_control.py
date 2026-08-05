@@ -46,6 +46,30 @@ class BinaryGripperController:
     config: GripperControlConfig
     sides: list[_SideState] = field(default_factory=lambda: [_SideState(), _SideState()])
 
+    def reset(self, action: np.ndarray | None = None, *, now_s: float = 0.0) -> None:
+        """Clear policy history, optionally seeding the final state from Teleop."""
+        self.sides = [_SideState(), _SideState()]
+        if action is None:
+            return
+        values = np.asarray(action, dtype=np.float32).reshape(2)
+        if not np.all(np.isfinite(values)):
+            raise ValueError("Gripper reset action contains NaN or Inf")
+        valid = np.isclose(values, self.config.open_value, rtol=0.0, atol=1e-6) | np.isclose(
+            values, self.config.close_value, rtol=0.0, atol=1e-6
+        )
+        if not np.all(valid):
+            raise ValueError(
+                "Gripper reset action must use configured open/close endpoints, "
+                f"got {values.tolist()}"
+            )
+        for side, value in zip(self.sides, values):
+            closed = bool(value >= (self.config.open_value + self.config.close_value) * 0.5)
+            side.initialized = True
+            side.base_closed = closed
+            side.pending_base_closed = closed
+            side.final_closed = closed
+            side.last_change_s = float(now_s)
+
     def _update_base(self, state: _SideState, score: float) -> None:
         hysteresis = self.config.hysteresis
         if not state.initialized:

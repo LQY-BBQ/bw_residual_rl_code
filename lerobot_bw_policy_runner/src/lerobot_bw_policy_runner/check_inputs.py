@@ -38,6 +38,9 @@ def main(argv: list[str] | None = None) -> int:
         expected = {config.robot.input_topics.state: "sensor_msgs/msg/JointState", **{topic: "sensor_msgs/msg/Image" for topic in config.robot.input_topics.cameras.values()}}
         if config.robot.input_topics.control_source:
             expected[config.robot.input_topics.control_source] = "std_msgs/msg/Int32"
+        optional = {}
+        if config.robot.input_topics.teleop_gripper_action:
+            optional[config.robot.input_topics.teleop_gripper_action] = "sensor_msgs/msg/JointState"
         ok = True
         print("Configured input topics:")
         for topic, typ in expected.items():
@@ -45,6 +48,16 @@ def main(argv: list[str] | None = None) -> int:
             if actual is None:
                 ok = False
                 print(f"  [MISSING] {topic} expected={typ}")
+            elif typ not in actual:
+                ok = False
+                print(f"  [TYPE?]   {topic} actual={actual} expected={typ}")
+            else:
+                print(f"  [OK]      {topic} type={typ}")
+        print("Optional handover input:")
+        for topic, typ in optional.items():
+            actual = topic_types.get(topic)
+            if actual is None:
+                print(f"  [MISSING] {topic} expected={typ} (required only for REMOTE handover)")
             elif typ not in actual:
                 ok = False
                 print(f"  [TYPE?]   {topic} actual={actual} expected={typ}")

@@ -108,38 +108,49 @@ residual_target = 0
 接管帧默认 loss 权重为 3，手臂损失为 Smooth L1。夹爪标签为
 `KEEP_BASE/FORCE_OPEN/FORCE_CLOSE`，左右分别使用训练集频次平方根倒数加权交叉熵。
 训练/验证按 episode 做 80/20 划分，四种 FORCE 侧别/方向必须同时出现在两边。
-每侧每种 FORCE 至少需要 20 个独立事件，否则训练会直接停止。
+`--gripper-min-events` 默认且推荐为每侧每种 FORCE 至少 20 个独立事件。可以显式降低到任意正整数；
+训练器仍会按传入值做真实预检，低于该值时在生成视觉缓存前停止。低于推荐值 20 时会打印警告，并把
+本次门槛和实际事件数一起写入 checkpoint，便于区分 pilot 模型和正式模型。
 
-当前已检查的数据还需要至少补采 8 次左夹爪打开纠正和 20 次右夹爪打开纠正；建议
-左开、左关、右开、右关均达到 25 次。
+当前 27 组 `Res_BC_Data` 的左开/左关、右开/右关事件数为 `11/17`、`18/23`，四类都存在。可以使用
+`--gripper-min-events 10` 直接进行 pilot 训练；20 仍是推荐覆盖量，正式部署前建议四类均达到 25 次。
 
 ```bash
 ./scripts/train_bc.sh \
-  --dataset.root ~/robot_datasets/bw_rl_corrections/rl_correction_001 \
-  --dataset.repo_id local/rl_correction_001 \
-  --act-policy-path ~/outputs/train/act_pick_block_gen3/checkpoints/last/pretrained_model \
-  --output_dir ~/outputs/train/residual_bc_pick_block \
+  --dataset.root ~/robot_datasets/pick_block_to_box/Res_BC_Data_merged \
+  --dataset.repo_id local/pick_block_to_box_res_bc_merged \
+  --act-policy-path ~/mycode/bw_residual_rl_code/lerobot_bw_policy_runner/outputs/train/act_pick_block_to_box/checkpoints/050000/pretrained_model \
+  --output_dir ~/mycode/bw_residual_rl_code/lerobot_bw_policy_runner/outputs/train/residual_bc_pick_block_to_box_v1 \
   --device cuda \
+  --seed 42 \
   --steps 20000 \
   --batch_size 256 \
   --hidden_dims 256 256 \
   --intervention-ratio 0.5 \
   --intervention-loss-weight 3.0 \
-  --residual-lambda 0.2 \
-  --residual-limit-default 0.03 \
+  --residual-lambda 1.0 \
+  --residual-limit-default 0.20 \
+  --gripper-min-events 10 \
+  --validation-ratio 0.2 \
   --gripper-hysteresis \
   --gripper-open-threshold 0.50 \
   --gripper-single-threshold 0.45 \
   --gripper-close-threshold 0.40 \
   --gripper-act-confirm-frames 3 \
+  --visual-feature-mode cache \
+  --visual-cache-batch-size 16 \
+  --visual-cache-dtype float16 \
+  --visual-cache-use-amp \
+  --video-backend torchcodec \
   --save_freq 2000 \
-  --log_freq 100
+  --log_freq 100 \
+  --num_workers 2
 ```
 
 输出：
 
 ```text
-~/outputs/train/residual_bc_pick_block/
+~/mycode/bw_residual_rl_code/lerobot_bw_policy_runner/outputs/train/residual_bc_pick_block_to_box_v1/
   checkpoints/last/residual_bc.pt
   checkpoints/last/config.json
   train_metrics.csv

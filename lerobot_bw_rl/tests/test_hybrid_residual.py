@@ -1,16 +1,35 @@
 from __future__ import annotations
 
+import sys
+from types import SimpleNamespace
+
 import numpy as np
+import pandas as pd
+import pytest
 import torch
 
+import bw_datasets.residual_transition_dataset as residual_dataset_module
 from bw_datasets.residual_transition_dataset import (
+    ResidualDatasetConfig,
     build_gripper_classes,
     count_gripper_events,
     discretize_gripper_commands,
+    preflight_gripper_event_counts,
 )
 from policies.residual_bc_policy import DeterministicResidualActor
 from policies.residual_sac_policy import Critic, SquashedGaussianActor
+from train_residual_bc import parse_args, validate_gripper_args, warn_if_relaxed_gripper_minimum
 from train_residual_sac import initialize_actor_from_bc
+
+
+def _gripper_args(minimum: int) -> SimpleNamespace:
+    return SimpleNamespace(
+        gripper_open_threshold=0.50,
+        gripper_single_threshold=0.45,
+        gripper_close_threshold=0.40,
+        gripper_min_events=minimum,
+        gripper_act_confirm_frames=3,
+    )
 
 
 def test_bc_and_sac_hybrid_shapes_and_frozen_gripper() -> None:
@@ -128,3 +147,73 @@ def test_gripper_labels_ignore_non_intervention_zero_human_actions() -> None:
     np.testing.assert_array_equal(classes[3], [0, 0])
     counts = count_gripper_events(classes, np.zeros(5, dtype=np.int64))
     np.testing.assert_array_equal(counts[:, 1:], [[0, 2], [2, 0]])
+
+
+@pytest.mark.parametrize("minimum", [1, 10, 20])
+def test_validate_gripper_args_allows_positive_minimum(minimum: int) -> None:
+    validate_gripper_args(_gripper_args(minimum))
+
+
+def test_parse_args_keeps_recommended_gripper_minimum_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "train_residual_bc.py",
+            "--dataset.root",
+            "/tmp/dataset",
+            "--act-policy-path",
+            "/tmp/act",
+            "--output_dir",
+            "/tmp/output",
+        ],
+    )
+    assert parse_args().gripper_min_events == 20
+
+
+def test_validate_gripper_args_rejects_non_positive_minimum() -> None:
+    with pytest.raises(ValueError, match="must be at least 1"):
+        validate_gripper_args(_gripper_args(0))
+
+
+def test_relaxed_gripper_minimum_prints_warning(capsys: pytest.CaptureFixture[str]) -> None:
+    warn_if_relaxed_gripper_minimum(10)
+    assert "WARNING" in capsys.readouterr().err
+
+    warn_if_relaxed_gripper_minimum(20)
+    assert capsys.readouterr().err == ""
+
+
+def test_preflight_gripper_event_counts_uses_requested_minimum(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    action_act = np.zeros((2, 16), dtype=np.float32)
+    action_executed = np.zeros((2, 16), dtype=np.float32)
+    action_act[0, [7, 15]] = 0.8
+    action_executed[1, [7, 15]] = 0.8
+    frame_table = pd.DataFrame(
+        {
+            "action.act": list(action_act),
+            "action.executed": list(action_executed),
+            "is_intervention": [1.0, 1.0],
+            "has_human_action": [1.0, 1.0],
+            "episode_index": [0, 1],
+        }
+    )
+    monkeypatch.setattr(
+        residual_dataset_module,
+        "read_lerobot_parquets",
+        lambda _root: frame_table,
+    )
+    config = ResidualDatasetConfig(
+        root=tmp_path,
+        residual_limits=np.full(14, 0.2, dtype=np.float32),
+    )
+
+    counts = preflight_gripper_event_counts(config, minimum=1)
+    np.testing.assert_array_equal(counts[:, 1:], [[1, 1], [1, 1]])
+    with pytest.raises(ValueError, match="Insufficient independent gripper correction events"):
+        preflight_gripper_event_counts(config, minimum=2)

@@ -6,6 +6,7 @@ import json
 import math
 from pathlib import Path
 import random
+import sys
 import time
 from typing import Iterator
 
@@ -29,6 +30,8 @@ JOINT_NAMES = [
     "right_shoulder_pitch_joint", "right_shoulder_yaw_joint", "right_shoulder_roll_joint", "right_elbow_joint",
     "right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint", "right_gripper_joint",
 ]
+MIN_GRIPPER_EVENTS = 1
+RECOMMENDED_GRIPPER_MIN_EVENTS = 20
 
 
 class BalancedInterventionBatchSampler(Sampler[list[int]]):
@@ -89,7 +92,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--residual-limit-default", type=float, default=0.03)
     parser.add_argument("--residual-limit-gripper", type=float, default=None)
     parser.add_argument("--gripper-loss-weight", type=float, default=1.0)
-    parser.add_argument("--gripper-min-events", type=int, default=20)
+    parser.add_argument(
+        "--gripper-min-events",
+        type=int,
+        default=RECOMMENDED_GRIPPER_MIN_EVENTS,
+        help=(
+            "Minimum independent FORCE_OPEN/FORCE_CLOSE events required per gripper side/class. "
+            f"Default/recommended: {RECOMMENDED_GRIPPER_MIN_EVENTS}; minimum allowed: {MIN_GRIPPER_EVENTS}."
+        ),
+    )
     parser.add_argument("--validation-ratio", type=float, default=0.2)
     hysteresis = parser.add_mutually_exclusive_group()
     hysteresis.add_argument("--gripper-hysteresis", dest="gripper_hysteresis", action="store_true")
@@ -135,10 +146,26 @@ def validate_gripper_args(args: argparse.Namespace) -> None:
         raise ValueError("Gripper thresholds must be finite")
     if not all(0.0 <= value <= 0.8 for value in thresholds):
         raise ValueError("Gripper thresholds must each be within [0.0, 0.8]")
-    if args.gripper_min_events < 20:
-        raise ValueError("--gripper-min-events cannot be lower than the required minimum of 20")
+    if args.gripper_min_events < MIN_GRIPPER_EVENTS:
+        raise ValueError(
+            f"--gripper-min-events must be at least {MIN_GRIPPER_EVENTS}; "
+            "use a positive threshold so every FORCE class is represented"
+        )
     if args.gripper_act_confirm_frames < 1:
         raise ValueError("--gripper-act-confirm-frames must be at least 1")
+
+
+def warn_if_relaxed_gripper_minimum(minimum: int) -> None:
+    if minimum >= RECOMMENDED_GRIPPER_MIN_EVENTS:
+        return
+    print(
+        "WARNING: "
+        f"--gripper-min-events={minimum} is below the recommended "
+        f"{RECOMMENDED_GRIPPER_MIN_EVENTS} independent events per FORCE class. "
+        "Training will continue after the requested minimum passes; treat this as a pilot "
+        "checkpoint and inspect validation metrics before deployment.",
+        file=sys.stderr,
+    )
 
 
 def split_episode_indices(dataset: ResidualBCDataset, *, validation_ratio: float, seed: int) -> tuple[list[int], list[int]]:
@@ -262,6 +289,7 @@ def main() -> int:
         f"left open/close={event_counts[0, 1]}/{event_counts[0, 2]}, "
         f"right open/close={event_counts[1, 1]}/{event_counts[1, 2]}"
     )
+    warn_if_relaxed_gripper_minimum(args.gripper_min_events)
     visual_cache = _prepare_visual_cache(args)
     dataset_config.visual_cache = visual_cache
     dataset = ResidualBCDataset(
@@ -326,6 +354,7 @@ def main() -> int:
         "gripper_loss_weight": float(args.gripper_loss_weight),
         "gripper_class_weights": class_weights.cpu().tolist(),
         "gripper_event_counts": event_counts.tolist(),
+        "gripper_min_events": int(args.gripper_min_events),
         "gripper_control": {
             "open_value": 0.0,
             "close_value": 0.8,
